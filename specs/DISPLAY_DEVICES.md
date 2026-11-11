@@ -677,8 +677,10 @@ the table above. Unknown, repeated, missing-value and invalid options fail befor
 worker launch; arbitrary ports, commands, paths and selectors are not accepted.
 Neither `doctor` nor inventory invokes this route.
 
-The coordinator and hidden worker share a compiled static allowlist containing
-`health` and `ct_serial_probe`. CT's callback validates the object payload before
+The coordinator and hidden worker share a compiled static diagnostic allowlist
+containing `health`, `ct_serial_probe`, `micro_hid_probe`, and
+`akp03_hid_probe`; the health coordinator retains health-only authority.
+CT's callback validates the object payload before
 calling `devices::ct::probe::run_native`; only the contained disposable Windows
 worker owns native serial handles, overlapped storage and the mutex. The callback
 also checks detached, one-process kill-on-close Job containment using the existing
@@ -1166,6 +1168,40 @@ error text. Treat it as sensitive diagnostic data rather than public telemetry.
 A zero-duration passive native probe still enumerates, opens/rechecks identity
 and verifies descriptor, but reads/writes no reports. Missing feature/platform
 fails native probing; health check works without either.
+
+### Explicit CLI integration and current platform limits
+
+`akp03-probe` accepts only `--capture-ms` followed by unsigned ASCII decimal
+`0..30000` (default `2000`) and valueless `--initialize`, `--test-pattern`, and
+`--health-check` flags. Unknown, repeated, missing or malformed options, test
+without initialize, and health/write conflicts fail before worker launch.
+
+The named private `__akp03-worker` route reuses the existing same-executable
+Windows bounded-stdio supervisor, not a new process host or transport.
+It receives a complete framed options object under kind `akp03_hid_probe`,
+rather than unframed command-line options. Its static allowlist authorizes only
+AKP03; no health, CT, Micro, arbitrary command, path or selector is admitted.
+The shared `__probe-worker` diagnostic registry also recognizes the AKP03
+callback. Both routes stay hidden from help and reject extra arguments.
+Duplicate frame keys and unknown/missing typed option/result fields fail
+closed. Live callbacks require detached, one-process kill-on-close Job
+containment before backend construction. Only the child can enumerate/open HID.
+The outcome also includes `hardware_qualified=false`; neither readiness nor
+qualification can be asserted by a worker. Read-only must equal `!initialize`,
+and at most 128 captures are admitted, without independently validating every
+progress field. Failed reports go to stderr with nonzero CLI status.
+
+Health uses no backend/transport and requires no feature. Where there is no
+Windows supervisor, only this pure no-I/O report runs in-process; live access
+has no fallback. Native probes require `akp03-hid`, but Windows currently lacks
+the required native interface number/raw descriptor and therefore fails closed
+before reports. macOS live CLI probes remain unavailable and macOS native writes
+remain disabled because no bounded diagnostic worker is integrated.
+Existing failure cleanup may additionally wait up to five seconds for exit and
+one for I/O joining; unconfirmed cleanup fences replacement. Raw captures can
+exceed the existing 65536-byte frame limit and then fail closed, never truncate
+JSON into success. No Windows runtime or physical input/display acceptance is
+claimed. Initialized output may leave brightness/display changed after release.
 
 ## 10. Offline control-map export
 

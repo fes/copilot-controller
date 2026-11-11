@@ -24,6 +24,12 @@ const CAPTURE_BUFFER: usize = 513;
 const READ_SLICE: Duration = Duration::from_millis(50);
 const CONNECT_INTERVAL: Duration = Duration::from_secs(5);
 
+fn required_nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Akp03ProbeOptions {
@@ -59,7 +65,9 @@ pub struct Candidate {
     pub product_id: u16,
     pub usage_page: u16,
     pub usage: u16,
+    #[serde(deserialize_with = "required_nullable")]
     pub interface_number: Option<i32>,
+    #[serde(deserialize_with = "required_nullable")]
     pub transport: Option<String>,
 }
 
@@ -69,13 +77,16 @@ pub struct Capture {
     pub elapsed_ms: u64,
     pub bytes: usize,
     pub hex: String,
+    #[serde(deserialize_with = "required_nullable")]
     pub decoded: Option<DecodedInput>,
+    #[serde(deserialize_with = "required_nullable")]
     pub decode_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Progress {
+    #[serde(deserialize_with = "required_nullable")]
     pub candidate: Option<Candidate>,
     pub opened: bool,
     pub descriptor_verified: bool,
@@ -97,6 +108,7 @@ pub struct Akp03ProbeResult {
     pub hardware_qualified: bool,
     pub read_only: bool,
     pub report: Progress,
+    #[serde(deserialize_with = "required_nullable")]
     pub error: Option<String>,
 }
 

@@ -661,6 +661,36 @@ Launch same executable's internal diagnostic worker through shared bounded-stdio
 
 Reject deserialized output asserting ready/qualified, inconsistent read-only accounting, or more than `128` captures/inputs. Shared supervisor internals are a separate contract.
 
+#### Explicit CLI integration and current platform limits
+
+`micro-probe` accepts only `--capture-ms` followed by unsigned ASCII decimal
+`0..30000` (default `2000`) and the valueless `--query`, `--read-keymap`,
+`--test-pattern`, and `--health-check` flags. Dependency/conflict rules above
+apply regardless of option order. Unknown, duplicate, missing or malformed
+options fail before worker launch; there is no port/path/command selector.
+
+Live access uses the shared private `__probe-worker` route with a framed,
+complete options object and kind `micro_hid_probe`. Its coordinator uses a
+Micro-only static allowlist; the hidden worker's compiled diagnostic registry
+also contains health, CT and AKP03 kinds. The callback validates all options,
+checks detached, one-process kill-on-close Windows Job containment, and only
+then constructs a native backend. Framing rejects duplicate JSON keys; typed
+outcomes/progress reject unknown or missing fields. Results are the complete
+outcome schema above, with failed reports on stderr and nonzero CLI status.
+Worker failures use `status: worker_error`; no partial success JSON is printed.
+Existing shared supervision can additionally wait up to five seconds for exit
+and one second for I/O joining after failure; unresolved cleanup fences reuse.
+Results exceeding the existing 65536-byte worker frame limit fail closed.
+
+`--health-check` bypasses backend construction and all device I/O in the child.
+On platforms without this Windows supervisor it returns only the pure health
+report in-process; this is not a live-I/O fallback. Native probing requires
+`micro-hid`. Windows cannot currently provide the required native interface,
+bus and raw report-descriptor evidence, so live probes fail closed before
+reports. macOS live CLI probing remains unsupported and native writes remain
+disabled; no bounded macOS diagnostic worker has been integrated. No hardware,
+Windows runtime containment, or physical input/output acceptance is claimed.
+
 Offline replay requires `1..128` ASCII strings, each `128` hex characters encoding exactly `64` bytes; upper/lowercase hex accepted, whitespace/wrong lengths invalid. Feed fresh framing decoder with time always zero. Return:
 
 - `read_only=true`

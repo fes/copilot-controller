@@ -136,9 +136,18 @@ The integration package currently routes offline inventories, synthetic previews
 bounded recorded assignments, decoders, and pinned local firmware-plan validation.
 `doctor` samples the native clock and available read-only process/desktop
 observations; serial/device discovery is deliberately unavailable. Contained
-health workers are Windows-only. State snapshots/recovery and shared
+health workers are Windows-only. Explicit `ct-probe`, `micro-probe`, and
+`akp03-probe` routes reuse the same-executable bounded Windows diagnostic
+supervisor, with static kind-only HID authority and validated options/results.
+Micro/AKP03 `--health-check` uses pure no-I/O reports on other platforms and
+requires no HID feature. Live HID probing requires the device-specific feature
+and native descriptor evidence; Windows HID currently lacks that evidence and
+fails closed. macOS live probes remain unavailable because no contained
+diagnostic worker exists; macOS HID writes remain disabled.
+State snapshots/recovery and shared
 authority-anchor ownership are explicit library-only APIs; no CLI route invokes
-them. No hardware transports or native updater are wired.
+them. No native updater is wired. No probe is action-ready or physically
+qualified; cross-compilation and synthetic tests are not hardware acceptance.
 Windows namespace mutations remain explicitly unavailable. Compiled codecs and
 test-only maintenance models are not runtime or physical acceptance.
 Native persistence acceptance tests require an explicitly approved filesystem

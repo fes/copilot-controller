@@ -1,7 +1,8 @@
 //! A contained, one-shot Windows diagnostic-worker transport.
 //!
 //! The executable supplies a static allowlist of diagnostic callbacks and routes
-//! [`HIDDEN_WORKER_ARGUMENT`] to [`maybe_run_hidden_worker`] before doing any
+//! [`HIDDEN_WORKER_ARGUMENT`] (or the fixed AKP03 route) to
+//! [`maybe_run_hidden_worker`] with that route's registry before doing any
 //! console attachment or normal command-line processing. The hidden invocation
 //! must exit immediately after the returned result, with a nonzero status on
 //! error. This module never selects an executable or executes a shell command.
@@ -28,6 +29,24 @@ mod tests;
 
 /// The executable must treat this as a private, exact single-argument route.
 pub const HIDDEN_WORKER_ARGUMENT: &str = "__probe-worker";
+/// AKP03 uses the same supervisor with a separate kind-only hidden registry.
+pub const AKP03_HIDDEN_WORKER_ARGUMENT: &str = "__akp03-worker";
+
+/// Fixed same-executable routes, never arbitrary command-line arguments.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticWorkerRoute {
+    Shared,
+    Akp03,
+}
+
+impl DiagnosticWorkerRoute {
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Shared => HIDDEN_WORKER_ARGUMENT,
+            Self::Akp03 => AKP03_HIDDEN_WORKER_ARGUMENT,
+        }
+    }
+}
 /// Maximum JSON body size, excluding the four-byte frame header.
 pub const MAX_FRAME_BODY_BYTES: usize = 65_536;
 /// Maximum discarded worker stderr, including the boundary.
@@ -156,10 +175,18 @@ impl DiagnosticCallback {
 /// A finite static callback allowlist; it contains no executable paths.
 pub struct DiagnosticAllowlist {
     callbacks: &'static [DiagnosticCallback],
+    route: DiagnosticWorkerRoute,
 }
 
 impl DiagnosticAllowlist {
     pub fn new(callbacks: &'static [DiagnosticCallback]) -> Result<Self, WorkerError> {
+        Self::new_for_route(callbacks, DiagnosticWorkerRoute::Shared)
+    }
+
+    pub fn new_for_route(
+        callbacks: &'static [DiagnosticCallback],
+        route: DiagnosticWorkerRoute,
+    ) -> Result<Self, WorkerError> {
         for (index, entry) in callbacks.iter().enumerate() {
             if !protocol::valid_kind(entry.kind)
                 || callbacks[..index]
@@ -169,7 +196,7 @@ impl DiagnosticAllowlist {
                 return Err(WorkerError::before_launch(WorkerErrorKind::InvalidRequest));
             }
         }
-        Ok(Self { callbacks })
+        Ok(Self { callbacks, route })
     }
 
     fn find(&self, kind: &str) -> Option<DiagnosticCallbackFn> {
@@ -218,7 +245,7 @@ pub fn probe(
 
     #[cfg(windows)]
     {
-        windows::supervise(frame, nonce, timeout, cancelled)
+        windows::supervise(frame, nonce, timeout, cancelled, allowlist.route)
     }
     #[cfg(not(windows))]
     {
@@ -227,7 +254,7 @@ pub fn probe(
     }
 }
 
-/// Recognize and serve the exact hidden invocation, or return `None` for a
+/// Recognize and serve the registry's exact hidden route, or return `None` for a
 /// normal invocation. `arguments` excludes the executable's own argv[0].
 ///
 /// Call this before any console attachment. A `Some` result must be followed
@@ -241,7 +268,7 @@ where
     S: AsRef<OsStr>,
 {
     let mut arguments = arguments.into_iter();
-    if arguments.next()?.as_ref() != OsStr::new(HIDDEN_WORKER_ARGUMENT) {
+    if arguments.next()?.as_ref() != OsStr::new(allowlist.route.argument()) {
         return None;
     }
     if arguments.next().is_some() {

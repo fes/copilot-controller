@@ -2,6 +2,7 @@
 //! mutation, or an explicit contained diagnostic-worker route is considered.
 
 mod ct_probe;
+mod hid_probe;
 
 use std::{
     io::Read,
@@ -29,7 +30,7 @@ use crate::{
 };
 
 pub const HELP: &str = "\
-Offline controller integration. No device discovery or action delivery.
+Offline controller integration. No device discovery or action delivery by default.
 
 Usage: copilot-controller <command>
   --help, --version
@@ -42,9 +43,13 @@ Usage: copilot-controller <command>
   micro-doctor [--discover (unavailable)]
   micro-decode <hex-report>... (1..128 exact 64-byte reports)
   micro-preview
+  micro-probe [--capture-ms <0..30000>] [--query] [--read-keymap]
+              [--test-pattern] [--health-check]
   akp03-doctor [--discover (unavailable)]
   akp03-decode <hex> [--rev2]
   akp03-preview
+  akp03-probe [--capture-ms <0..30000>] [--initialize]
+              [--test-pattern] [--health-check]
   micro-firmware-plan --image <absolute-file> --esptool <absolute-file>
                       (offline pinned-file validation; micro-firmware feature)
   probe-health (contained Windows worker only)
@@ -53,9 +58,13 @@ Usage: copilot-controller <command>
            [--max-events <1..128>] [--max-received-bytes <256..32768>]
            [--test-pattern] (explicit contained Windows serial diagnostic)
 
-All previews are synthetic and not ready. CT is the only native hardware CLI
-probe; display writes require --test-pattern. Other hardware probes and firmware
-execution are unavailable. Doctor observes the native clock and read-only
+All previews and probes are not ready or hardware-qualified. Native probes use
+contained Windows workers only. HID capture defaults to 2000 ms. Micro keymap
+and LED test require --query; AKP03 display test requires --initialize.
+--health-check conflicts with these opt-ins and performs no device access.
+Windows HID descriptor evidence is unavailable, so HID live probes fail closed;
+macOS live probes/writes and firmware execution remain unavailable.
+Doctor observes the native clock and read-only
 process/desktop metadata where supported; it never discovers or opens devices.
 No runtime or terminal actions are exposed.";
 
@@ -86,6 +95,8 @@ pub enum Command {
     },
     Health,
     CtProbe(crate::devices::ct::probe::Options),
+    MicroProbe(micro::probe::MicroProbeOptions),
+    Akp03Probe(akp03::probe::Akp03ProbeOptions),
     FirmwarePlan {
         image: PathBuf,
         tool: PathBuf,
@@ -239,6 +250,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "device-assign" => return assignment(args),
         "micro-decode" => return micro_reports(args),
         "ct-probe" => return ct_probe::parse(args).map(Command::CtProbe),
+        "micro-probe" | "akp03-probe" => {
+            return hid_probe::parse(args, name == "micro-probe").map(|options| match options {
+                hid_probe::Options::Micro(options) => Command::MicroProbe(options),
+                hid_probe::Options::Akp03(options) => Command::Akp03Probe(options),
+            });
+        }
         "micro-firmware-plan" => {
             let mut image = None;
             let mut tool = None;
@@ -311,7 +328,6 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             svg: true,
         }),
         "probe-health" => Ok(Command::Health),
-        "micro-probe" | "akp03-probe" => Ok(Command::Unavailable("hardware probe backend")),
         "micro-firmware-update" => Ok(Command::Unavailable("firmware CLI/native backend")),
         _ => Err("unsupported command; no action-delivery interface is available".into()),
     }
@@ -355,6 +371,8 @@ fn capabilities() -> Value {
         "offline_codecs": ["micro", "akp03-original", "akp03e-rev2", "ct-pid-0003"],
         "hardware_backend_available": cfg!(windows),
         "ct_serial_probe_available": cfg!(windows),
+        "micro_hid_probe_available": false,
+        "akp03_hid_probe_available": false,
         "firmware_execution_available": false,
         "runtime_owner_acquired": false,
         "state_store_api_available": cfg!(any(target_os = "linux", target_os = "macos")),
@@ -364,7 +382,9 @@ fn capabilities() -> Value {
             "micro_hid": cfg!(feature = "micro-hid"),
             "micro_firmware": cfg!(feature = "micro-firmware"),
         },
-        "limitations": ["CT CLI probing requires explicit opt-in and a contained Windows worker; no probe supplies action readiness or physical qualification."],
+        "limitations": ["Native CLI probing requires explicit opt-in and a contained Windows worker; no probe supplies action readiness or physical qualification.",
+            "Micro/AKP03 live probes fail closed without device-specific features and required native descriptor evidence; Windows HID evidence is unavailable, and macOS has no contained diagnostic worker.",
+            "Micro/AKP03 health checks perform no device access and do not require HID features."],
     })
 }
 
@@ -381,9 +401,9 @@ fn export(candidate: &CandidateAssignment, path: PathBuf) -> Result<(), String> 
 }
 
 /// Execute an already validated offline route. Only assignment reads stdin,
-/// only confirmed assignment export mutates files. Health and CT launch
-/// compiled-in contained diagnostic workers (on Windows); CT display writes
-/// require the explicit test-pattern option.
+/// only confirmed assignment export mutates files. Native probes launch
+/// compiled-in contained diagnostic workers (on Windows). HID health checks
+/// have a pure no-I/O path on other platforms; no live-I/O fallback exists.
 pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
     match command {
         Command::Help => Ok(Output::Text(HELP.into())),
@@ -531,6 +551,8 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
             })))
         }
         Command::CtProbe(options) => ct_probe::execute(options),
+        Command::MicroProbe(options) => hid_probe::execute(hid_probe::Options::Micro(options)),
+        Command::Akp03Probe(options) => hid_probe::execute(hid_probe::Options::Akp03(options)),
         Command::FirmwarePlan { image, tool } => {
             if !cfg!(feature = "micro-firmware") {
                 return Err(
@@ -550,12 +572,24 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
 static HEALTH_CALLBACKS: [worker::DiagnosticCallback; 1] =
     [worker::DiagnosticCallback::new("health", health_callback)];
 
-static DIAGNOSTIC_CALLBACKS: [worker::DiagnosticCallback; 2] = [
+static MICRO_CALLBACKS: [worker::DiagnosticCallback; 1] = [worker::DiagnosticCallback::new(
+    hid_probe::MICRO_KIND,
+    hid_probe::micro_callback,
+)];
+
+static AKP03_CALLBACKS: [worker::DiagnosticCallback; 1] = [worker::DiagnosticCallback::new(
+    hid_probe::AKP03_KIND,
+    hid_probe::akp03_callback,
+)];
+
+static DIAGNOSTIC_CALLBACKS: [worker::DiagnosticCallback; 4] = [
     worker::DiagnosticCallback::new("health", health_callback),
     worker::DiagnosticCallback::new(ct_probe::KIND, ct_probe::callback),
+    MICRO_CALLBACKS[0],
+    AKP03_CALLBACKS[0],
 ];
 
-/// Explicit CT-enabled registry for the diagnostic coordinator and hidden worker.
+/// Compiled diagnostic registry for the shared hidden worker, never health authority.
 pub fn diagnostic_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
     worker::DiagnosticAllowlist::new(&DIAGNOSTIC_CALLBACKS).map_err(|error| error.to_string())
 }
@@ -565,6 +599,19 @@ pub fn health_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
     worker::DiagnosticAllowlist::new(&HEALTH_CALLBACKS).map_err(|error| error.to_string())
 }
 
+/// Micro-only authority for the explicit HID coordinator.
+pub fn micro_probe_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new(&MICRO_CALLBACKS).map_err(|error| error.to_string())
+}
+
+/// AKP03-only authority for its named hidden route and explicit coordinator.
+pub fn akp03_probe_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new_for_route(
+        &AKP03_CALLBACKS,
+        worker::DiagnosticWorkerRoute::Akp03,
+    )
+    .map_err(|error| error.to_string())
+}
 fn health_callback(payload: Value) -> Result<Value, worker::DiagnosticCallbackError> {
     if !payload.is_null() {
         return Err(worker::DiagnosticCallbackError);

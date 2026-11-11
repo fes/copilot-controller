@@ -190,6 +190,81 @@ fn production_ct_callback_is_allowlisted_and_invalid_payload_is_not_success_shap
 }
 
 #[test]
+fn hid_registries_have_kind_only_authority_and_named_route_is_private() {
+    let health = crate::cli::health_allowlist().unwrap();
+    let micro = crate::cli::micro_probe_allowlist().unwrap();
+    let akp03 = crate::cli::akp03_probe_allowlist().unwrap();
+    let combined = crate::cli::diagnostic_allowlist().unwrap();
+    assert_eq!(micro.route, DiagnosticWorkerRoute::Shared);
+    assert_eq!(akp03.route, DiagnosticWorkerRoute::Akp03);
+    for (registry, accepted) in [
+        (&health, "health"),
+        (&micro, "micro_hid_probe"),
+        (&akp03, "akp03_hid_probe"),
+    ] {
+        for kind in [
+            "health",
+            "ct_serial_probe",
+            "micro_hid_probe",
+            "akp03_hid_probe",
+        ] {
+            let envelope = RequestEnvelope {
+                version: VERSION,
+                request_nonce: nonce(),
+                request: DiagnosticRequest {
+                    kind: kind.into(),
+                    payload: Value::Null,
+                },
+            };
+            assert_eq!(registry.find(kind).is_some(), kind == accepted);
+            if kind == accepted {
+                protocol::validate_request(&envelope, registry).unwrap();
+            } else {
+                assert_eq!(
+                    protocol::validate_request(&envelope, registry),
+                    Err(WorkerErrorKind::InvalidRequest),
+                );
+                // Wrong-kind rejection happens before any platform/worker I/O.
+                let error = probe(
+                    &envelope.request,
+                    Duration::from_secs(3),
+                    &AtomicBool::new(false),
+                    registry,
+                )
+                .unwrap_err();
+                assert_eq!(error.kind, WorkerErrorKind::InvalidRequest);
+                assert_eq!(error.worker, None);
+            }
+        }
+    }
+    for kind in ["micro_hid_probe", "akp03_hid_probe"] {
+        let callback = combined.find(kind).expect("compiled HID callback");
+        let outcome = protocol::invoke_callback(callback, json!({"command": "private"}));
+        assert!(matches!(outcome, Outcome::CallbackFailed));
+    }
+    assert!(combined.find("command").is_none());
+    assert!(maybe_run_hidden_worker([HIDDEN_WORKER_ARGUMENT], &akp03).is_none());
+    assert!(maybe_run_hidden_worker([AKP03_HIDDEN_WORKER_ARGUMENT], &combined).is_none());
+    let error = maybe_run_hidden_worker([AKP03_HIDDEN_WORKER_ARGUMENT, "extra"], &akp03)
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind, WorkerErrorKind::InvalidRequest);
+}
+
+#[test]
+fn framed_hid_options_reject_duplicate_keys_before_callback_admission() {
+    for body in [
+        br#"{"version":1,"request_nonce":"11111111-1111-4111-8111-111111111111","request":{"kind":"micro_hid_probe","payload":{"capture_ms":0,"query":false,"query":true,"read_keymap":false,"test_pattern":false,"health_check":false}}}"#.as_slice(),
+        br#"{"version":1,"request_nonce":"11111111-1111-4111-8111-111111111111","request":{"kind":"akp03_hid_probe","payload":{"capture_ms":0,"initialize":false,"initialize":true,"test_pattern":false,"health_check":false}}}"#.as_slice(),
+    ] {
+        assert!(matches!(
+            protocol::read_frame::<_, RequestEnvelope>(&mut Cursor::new(frame(body))),
+            Err(WorkerErrorKind::Protocol),
+        ));
+    }
+}
+
+#[test]
 fn frame_limits_and_truncation_are_distinct() {
     for length in [0_u32, 65_537, u32::MAX] {
         assert_eq!(

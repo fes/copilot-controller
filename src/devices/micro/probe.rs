@@ -26,6 +26,12 @@ const INPUT_BUDGET: usize = 128;
 const READ_SLICE: Duration = Duration::from_millis(50);
 const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
 
+fn required_nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MicroProbeOptions {
@@ -66,6 +72,7 @@ pub struct Candidate {
     pub product_id: u16,
     pub usage_page: u16,
     pub usage: u16,
+    #[serde(deserialize_with = "required_nullable")]
     pub interface_number: Option<i32>,
     pub transport: String,
 }
@@ -90,22 +97,29 @@ pub struct Joystick {
 pub struct ObservedInput {
     pub elapsed_ms: u64,
     pub message: Value,
+    #[serde(deserialize_with = "required_nullable")]
     pub slot_requested: Option<u8>,
+    #[serde(deserialize_with = "required_nullable")]
     pub command_key_observed: Option<String>,
     pub mic_observed: bool,
+    #[serde(deserialize_with = "required_nullable")]
     pub joystick: Option<Joystick>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Progress {
+    #[serde(deserialize_with = "required_nullable")]
     pub candidate: Option<Candidate>,
     pub opened: bool,
     pub descriptor_verified: bool,
     pub phase: String,
+    #[serde(deserialize_with = "required_nullable")]
     pub firmware: Option<String>,
     pub firmware_reference_compatible: bool,
+    #[serde(deserialize_with = "required_nullable")]
     pub device_status: Option<Value>,
+    #[serde(deserialize_with = "required_nullable")]
     pub keymap: Option<Value>,
     pub output_attempts: usize,
     pub output_reports: usize,
@@ -118,6 +132,7 @@ pub struct Progress {
     pub capture_truncated: bool,
     pub led_test_attempted: bool,
     pub led_clear_acknowledged: bool,
+    #[serde(deserialize_with = "required_nullable")]
     pub cleanup_error: Option<String>,
     pub elapsed_ms: u64,
 }
@@ -130,6 +145,7 @@ pub struct MicroProbeResult {
     pub hardware_qualified: bool,
     pub read_only: bool,
     pub report: Progress,
+    #[serde(deserialize_with = "required_nullable")]
     pub error: Option<String>,
 }
 

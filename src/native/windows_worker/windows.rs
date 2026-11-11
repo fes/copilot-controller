@@ -46,7 +46,7 @@ use windows_sys::Win32::System::Threading::{
 use super::protocol::{self, RequestEnvelope, ResponseEnvelope};
 use super::supervision::{Progress, SupervisorGate};
 use super::{
-    DiagnosticAllowlist, DiagnosticResult, HIDDEN_WORKER_ARGUMENT, WorkerError,
+    DiagnosticAllowlist, DiagnosticResult, DiagnosticWorkerRoute, WorkerError,
     WorkerErrorKind as Kind, WorkerIdentity,
 };
 
@@ -237,7 +237,7 @@ impl Drop for AttributeList {
     }
 }
 
-fn executable_command() -> Result<(Vec<u16>, Vec<u16>), Kind> {
+fn executable_command(route: DiagnosticWorkerRoute) -> Result<(Vec<u16>, Vec<u16>), Kind> {
     let path = std::env::current_exe().map_err(|_| Kind::Spawn)?;
     let mut application: Vec<u16> = path.as_os_str().encode_wide().collect();
     if application.is_empty() || application.contains(&0) || application.contains(&(b'"' as u16)) {
@@ -254,7 +254,7 @@ fn executable_command() -> Result<(Vec<u16>, Vec<u16>), Kind> {
     command.extend(std::iter::repeat_n(b'\\' as u16, trailing_slashes));
     command.push(b'"' as u16);
     command.push(b' ' as u16);
-    command.extend(HIDDEN_WORKER_ARGUMENT.encode_utf16());
+    command.extend(route.argument().encode_utf16());
     command.push(0);
     application.push(0);
     Ok((application, command))
@@ -630,6 +630,7 @@ pub(super) fn supervise(
     nonce: Uuid,
     timeout: Duration,
     cancelled: &AtomicBool,
+    route: DiagnosticWorkerRoute,
 ) -> Result<DiagnosticResult, WorkerError> {
     let _active = SUPERVISOR.acquire().map_err(WorkerError::before_launch)?;
     let deadline = Instant::now()
@@ -645,7 +646,8 @@ pub(super) fn supervise(
         child_stderr,
     } = Pipes::new().map_err(WorkerError::before_launch)?;
     let job = job().map_err(WorkerError::before_launch)?;
-    let (application, mut command) = executable_command().map_err(WorkerError::before_launch)?;
+    let (application, mut command) =
+        executable_command(route).map_err(WorkerError::before_launch)?;
     for child in [&child_stdin, &child_stdout, &child_stderr] {
         set_inheritance(handle(child), true).map_err(WorkerError::before_launch)?;
     }

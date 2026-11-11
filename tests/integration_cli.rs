@@ -191,16 +191,14 @@ fn validation_errors_and_live_routes_have_no_success_output() {
         assert!(output.stdout.is_empty(), "{args:?}");
         assert!(!output.stderr.is_empty(), "{args:?}");
     }
-    for command in ["micro-probe", "akp03-probe", "micro-firmware-update"] {
-        let output = invoke(&[command]);
-        assert!(!output.status.success());
-        assert!(output.stdout.is_empty());
-        assert!(
-            String::from_utf8(output.stderr)
-                .unwrap()
-                .contains("unavailable")
-        );
-    }
+    let output = invoke(&["micro-firmware-update"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("unavailable")
+    );
     for command in ["micro-doctor", "akp03-doctor"] {
         let output = invoke(&[command, "--discover"]);
         assert!(!output.status.success());
@@ -210,6 +208,122 @@ fn validation_errors_and_live_routes_have_no_success_output() {
                 .unwrap()
                 .contains("unavailable")
         );
+    }
+}
+
+#[test]
+fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
+    for args in [
+        vec!["micro-probe", "--capture-ms", "30001"],
+        vec!["micro-probe", "--capture-ms", "-1"],
+        vec!["micro-probe", "--capture-ms", "0", "--capture-ms", "1"],
+        vec!["micro-probe", "--query", "--query"],
+        vec!["micro-probe", "--read-keymap"],
+        vec!["micro-probe", "--test-pattern"],
+        vec!["micro-probe", "--query", "--health-check"],
+        vec!["micro-probe", "--query", "--command", "anything"],
+        vec!["micro-probe", "--initialize"],
+        vec!["akp03-probe", "--capture-ms"],
+        vec!["akp03-probe", "--capture-ms", "1.0"],
+        vec!["akp03-probe", "--capture-ms", "30001"],
+        vec!["akp03-probe", "--initialize", "--initialize"],
+        vec!["akp03-probe", "--test-pattern"],
+        vec!["akp03-probe", "--initialize", "--health-check"],
+        vec!["akp03-probe", "--query"],
+        vec!["akp03-probe", "--path", "anything"],
+        vec!["__akp03-worker"],
+        vec!["__akp03-worker", "extra"],
+        vec!["__akp03-worker", "--capture-ms", "0"],
+        vec!["__micro-worker", "--query"],
+    ] {
+        let output = invoke(&args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(!output.stderr.is_empty(), "{args:?}");
+    }
+    let help = invoke(&["--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("micro-probe"));
+    assert!(text.contains("akp03-probe"));
+    assert!(!text.contains("__probe-worker"));
+    assert!(!text.contains("__akp03-worker"));
+    #[cfg(not(windows))]
+    for args in [
+        vec!["micro-probe", "--capture-ms", "0"],
+        vec!["micro-probe", "--query", "--read-keymap", "--test-pattern"],
+        vec!["akp03-probe", "--capture-ms", "0"],
+        vec!["akp03-probe", "--initialize", "--test-pattern"],
+    ] {
+        let output = invoke(&args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(output.stdout.is_empty());
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["status"], "worker_error");
+        assert_eq!(error["error"]["kind"], "unsupported_platform");
+        assert!(error["error"]["worker"].is_null());
+    }
+}
+
+#[test]
+fn hid_health_is_feature_independent_and_reports_zero_device_io() {
+    for command in ["micro-probe", "akp03-probe"] {
+        let output = invoke(&[command, "--health-check", "--capture-ms", "30000"]);
+        #[cfg(windows)]
+        if !output.status.success() {
+            // Windows hosts can refuse containment; never replace it with live I/O.
+            assert!(output.stdout.is_empty());
+            assert!(!output.stderr.is_empty());
+            continue;
+        }
+        assert!(output.status.success(), "{command}: {:?}", output.stderr);
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["probe_succeeded"], true);
+        assert_eq!(value["command_ready"], false);
+        assert_eq!(value["hardware_qualified"], false);
+        assert_eq!(value["read_only"], true);
+        assert!(value["error"].is_null());
+        assert!(value["report"]["candidate"].is_null());
+        assert_eq!(value["report"]["opened"], false);
+        assert_eq!(value["report"]["descriptor_verified"], false);
+        assert_eq!(value["report"]["phase"], "health_check");
+        assert_eq!(value["report"]["output_reports"], 0);
+        assert_eq!(value["report"]["output_bytes"], 0);
+        assert_eq!(value["report"]["captures"], json!([]));
+        #[cfg(not(windows))]
+        {
+            let args: Vec<_> = [command, "--health-check"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            cli::execute(cli::parse(&args).unwrap(), RefuseInput).unwrap();
+        }
+    }
+}
+
+#[cfg(all(windows, any(not(feature = "micro-hid"), not(feature = "akp03-hid"))))]
+#[test]
+fn disabled_hid_cli_reports_fail_nonzero_without_native_backend_access() {
+    let mut commands: Vec<&str> = Vec::new();
+    #[cfg(not(feature = "micro-hid"))]
+    commands.push("micro-probe");
+    #[cfg(not(feature = "akp03-hid"))]
+    commands.push("akp03-probe");
+    for command in commands {
+        let output = invoke(&[command, "--capture-ms", "0"]);
+        assert!(!output.status.success(), "{command}");
+        assert!(output.stdout.is_empty());
+        let failure: Value = serde_json::from_slice(&output.stderr).unwrap();
+        if failure.get("report").is_some() {
+            assert_eq!(failure["probe_succeeded"], false);
+            assert_eq!(failure["command_ready"], false);
+            assert_eq!(failure["hardware_qualified"], false);
+            assert_eq!(failure["report"]["opened"], false);
+            assert!(failure["report"]["candidate"].is_null());
+        } else {
+            assert_eq!(failure["status"], "worker_error");
+        }
     }
 }
 
