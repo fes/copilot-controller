@@ -1,6 +1,6 @@
 # Disposable diagnostic worker
 
-This module provides a one-request Windows worker, not a terminal action,
+This module provides one-request Windows and macOS ARM64 workers, not a terminal action,
 credential sandbox, or readiness/qualification signal. It has no built-in
 production callbacks and never selects a caller-provided executable or shell.
 The executable must supply a finite, static **diagnostic-only** callback
@@ -15,6 +15,9 @@ Add this directory as a Rust module and provide these dependencies:
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -51,8 +54,9 @@ correlation and lifecycle state. A successful response must not change
 `read_only`, `command_ready`, or qualification policy.
 
 Admission checks the 1 ms–120 s timeout, prelaunch cancellation, request and
-allowlist, and bounded encoding before platform dispatch. Non-Windows returns
-`unsupported_platform` after those checks without invoking a callback.
+allowlist, and bounded encoding before platform dispatch. macOS ARM64 admits
+only health, Micro and AKP03 and revalidates complete typed options before spawn.
+Other non-Windows targets return `unsupported_platform` without a callback.
 Frames use one 65,536-byte-maximum JSON body and require EOF; stderr is
 discarded with a 16,384-byte limit. Duplicate JSON object keys (including inside
 generic payloads) fail as `protocol` before callback dispatch.
@@ -87,6 +91,41 @@ fence is neither durable nor cross-process, and the Job is not a
 credential-restricted hostile-code sandbox.
 
 ## Tests
+
+### macOS ARM64
+
+The macOS platform block retains the existing module/API name and exact routes.
+It spawns only the current executable with PGID == PID, uses bounded nonblocking
+stdio (no I/O threads), correlates native PID/start time plus nonce, and enforces
+the Micro/AKP03 §9 budgets (caller timeouts can only shorten them). On every
+completion it signals the group while WNOWAIT retains the leader PID, then reaps
+within a two-second per-attempt cleanup budget (Drop may retry once) and
+explicitly closes pipes. Unconfirmed
+cleanup stickily forbids replacement. No parent-death or escape guarantee exists.
+
+Only a fully validated child callback can receive the private, thread-bound,
+per-request IOKit capability; native access also verifies a same-executable
+parent. Public in-process backend construction fails closed. Health receives no
+HID capability and never constructs/enumerates/opens transport. Native IOKit
+output has no per-write deadline and may leave physical state changed on kill.
+CT remains Windows-only; Linux live probes remain disabled. No native descriptor
+or physical input/output acceptance is claimed. See platform appendix §8.7.
+
+The self-authored fixture exercises no hardware and adds no production callback:
+
+```sh
+cargo build --all-features --example macos_worker_fixture
+MACOS_WORKER_TEST_HELPER="$PWD/target/debug/examples/macos_worker_fixture" \
+  cargo test --all-features --lib native::windows_worker -- --include-ignored
+```
+
+Run the same commands without `--all-features` to verify feature-independent
+health and fail-closed capability paths. Tests cover same-executable success,
+native identity/nonce mismatch, malformed/duplicate/trailing frames, blocked
+stdin, deadline/cancellation kill/reap, stdout/stderr bounds, private-route and
+capability rejection, stale capability invalidation and sticky lost-leader
+cleanup. Fake SetReport fixtures exercise the actual write gate without IOKit
+enumeration/open/output. Windows runtime tests below remain platform-specific.
 
 `tests.rs` exercises framing, admission, correlation, cancellation, failure
 precedence, and fencing with synthetic data. `tests/worker_fixture.rs` and

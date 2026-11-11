@@ -8,9 +8,10 @@
 //! Platform HID calls are synchronous. Report reads accept a timeout that the
 //! native backends attempt to honor (overlapped I/O on Windows, run-loop timeout
 //! on macOS), but the behavior has not been validated against hardware. Windows
-//! writes use a fixed best-effort deadline. macOS writes are unavailable (typed
-//! `UnsupervisedWrite`) because `IOHIDDeviceSetReport` can block indefinitely and no
-//! supervised worker exists there. Callers must run any live use inside a
+//! writes use a fixed best-effort deadline. All macOS IOKit access requires a
+//! private capability issued only inside the verified supervised worker.
+//! `IOHIDDeviceSetReport` can block indefinitely; only the parent worker deadline
+//! bounds its lifetime, not an individual write timeout. Callers must run any live use inside a
 //! disposable, supervised worker process that can be killed; this module does not
 //! provide a bounded live probe.
 //!
@@ -34,6 +35,13 @@ pub use platform::{HidFeature, PlatformSupport, platform_support};
     target_arch = "aarch64"
 ))]
 mod iokit;
+#[cfg(all(
+    test,
+    any(feature = "akp03-hid", feature = "micro-hid"),
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+pub(crate) use iokit::fixture_output;
 #[cfg(all(
     any(feature = "akp03-hid", feature = "micro-hid"),
     windows,
@@ -145,8 +153,10 @@ pub enum UnavailableReason {
     /// Neither `akp03-hid` nor `micro-hid` was compiled in.
     FeatureDisabled,
     UnsupportedPlatform,
-    /// The backend cannot bound writes and no supervised worker exists for it.
+    /// The transport lacks supervised write authority.
     UnsupervisedWrite,
+    /// Native macOS access requires the private supervised-child capability.
+    UnsupervisedAccess,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -371,7 +381,9 @@ pub fn enumerate(
 
 /// Explicit opt-in constructor for the platform backend. Fails closed with a
 /// typed `Unavailable` when the feature, OS, or architecture is unsupported
-/// (always on Linux). Construction touches no device.
+/// (always on Linux). On macOS, also requires the private supervised-child
+/// capability; ordinary in-process API calls fail closed. Construction touches
+/// no device.
 pub fn native_backend() -> Result<Box<dyn HidBackend>, HidError> {
     match platform_support(
         cfg!(any(feature = "akp03-hid", feature = "micro-hid")),
@@ -398,7 +410,7 @@ fn native_backend_impl() -> Result<Box<dyn HidBackend>, HidError> {
     target_arch = "aarch64"
 ))]
 fn native_backend_impl() -> Result<Box<dyn HidBackend>, HidError> {
-    Ok(Box::new(iokit::IoKitHid))
+    Ok(Box::new(iokit::IoKitHid::new()?))
 }
 
 #[cfg(not(any(

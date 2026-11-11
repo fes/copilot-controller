@@ -689,13 +689,16 @@ Live access uses the shared private `__probe-worker` route with a framed,
 complete options object and kind `micro_hid_probe`. Its coordinator uses a
 Micro-only static allowlist; the hidden worker's compiled diagnostic registry
 also contains health, CT and AKP03 kinds. The callback validates all options,
-checks detached, one-process kill-on-close Windows Job containment, and only
+checks detached, one-process kill-on-close Windows Job containment or the macOS
+ARM64 process-group worker capability (platform appendix §8.7), and only
 then constructs a native backend. Framing rejects duplicate JSON keys; typed
 outcomes/progress reject unknown or missing fields. Results are the complete
 outcome schema above, with failed reports on stderr and nonzero CLI status.
 Worker failures use `status: worker_error`; no partial success JSON is printed.
-Existing shared supervision can additionally wait up to five seconds for exit
-and one second for I/O joining after failure; unresolved cleanup fences reuse.
+Windows supervision can additionally wait up to five seconds for exit
+and one second for I/O joining after failure; macOS group cleanup has a two-second
+budget per attempt (Drop may retry once) and closes parent pipes synchronously.
+Unresolved cleanup fences reuse.
 The result policy runs **after** all native sequencing and attempted LED
 cleanup. It measures compact serialized bytes without building unbounded output.
 Payloads must fit 65280 bytes, reserving 256 bytes within the unchanged 65536-byte
@@ -723,13 +726,17 @@ result budgeting. The shared frame encoder also returns a correlated compact
 the coordinator reports `frame_limit` rather than unexplained EOF.
 
 `--health-check` bypasses backend construction and all device I/O in the child.
-On platforms without this Windows supervisor it returns only the pure health
+On platforms without the Windows/macOS ARM64 supervisor it returns only the pure health
 report in-process; this is not a live-I/O fallback. Native probing requires
 `micro-hid`. Windows cannot currently provide the required native interface,
 bus and raw report-descriptor evidence, so live probes fail closed before
-reports. macOS live CLI probing remains unsupported and native writes remain
-disabled; no bounded macOS diagnostic worker has been integrated. No hardware,
-Windows runtime containment, or physical input/output acceptance is claimed.
+reports. macOS ARM64 now uses the same-executable bounded process-group worker;
+all IOKit access and writes require its private scoped capability and a
+same-executable parent. No ordinary in-process native access or live fallback
+exists. Exact native property/descriptor evidence remains required and unverified
+on hardware. Process groups have no parent-death/escape guarantee, and killing
+the child cannot prove LED clearing. No hardware, Windows runtime containment,
+or physical input/output acceptance is claimed.
 
 Offline replay requires `1..128` ASCII strings, each `128` hex characters encoding exactly `64` bytes; upper/lowercase hex accepted, whitespace/wrong lengths invalid. Feed fresh framing decoder with time always zero. Return:
 

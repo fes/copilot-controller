@@ -24,6 +24,7 @@ pub struct PlatformSupport {
     pub process_window_desktop_serial_observations: Support,
     pub explicit_qualification_probes: Support,
     pub framed_job_workers: Support,
+    pub framed_process_group_workers: Support,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -182,6 +183,13 @@ pub fn portable_inventory() -> CapabilityInventory {
         process_window_desktop_serial_observations: windows_observations,
         explicit_qualification_probes: windows_observations,
         framed_job_workers: windows_workers,
+        framed_process_group_workers: if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Support::Compiled {
+                prerequisite: "same_executable_health_or_opt_in_hid_no_parent_death_or_escape_guarantee",
+            }
+        } else {
+            unavailable("unsupported_platform")
+        },
     };
     let integrated = HostSupport {
         discovery: unavailable("versioned_host_contract_required"),
@@ -206,21 +214,39 @@ pub fn portable_inventory() -> CapabilityInventory {
     let device = |class, transport, diagnostic_transport| DeviceSupport {
         class,
         transport,
-        discovery: unavailable("device_backend_not_integrated"),
+        discovery: if cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            && matches!(
+                class,
+                DeviceClass::PrimaryUsbController
+                    | DeviceClass::RelatedWirelessController
+                    | DeviceClass::AlternateSecondRevisionProfile
+            ) {
+            unavailable("metadata_only_inside_explicit_hid_probe")
+        } else {
+            unavailable("device_backend_not_integrated")
+        },
         diagnostic_transport,
         runtime_qualified: false,
     };
-    let unintegrated = unavailable("device_backend_not_integrated");
+    let macos_hid = |enabled| {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) && enabled {
+            Support::Compiled {
+                prerequisite: "explicit_hid_probe_private_worker_capability_exact_native_evidence_unverified_on_hardware",
+            }
+        } else {
+            unavailable("device_backend_not_integrated")
+        }
+    };
     let devices = vec![
         device(
             DeviceClass::PrimaryUsbController,
             Transport::Usb,
-            unintegrated,
+            macos_hid(cfg!(feature = "micro-hid")),
         ),
         device(
             DeviceClass::RelatedWirelessController,
             Transport::Bluetooth,
-            unintegrated,
+            macos_hid(cfg!(feature = "micro-hid")),
         ),
         device(
             DeviceClass::AlternateOriginalProfile,
@@ -230,12 +256,12 @@ pub fn portable_inventory() -> CapabilityInventory {
         device(
             DeviceClass::AlternateSecondRevisionProfile,
             Transport::Usb,
-            unintegrated,
+            macos_hid(cfg!(feature = "akp03-hid")),
         ),
         device(
             DeviceClass::SerialControlSurface,
             Transport::Serial,
-            unintegrated,
+            unavailable("device_backend_not_integrated"),
         ),
     ];
     CapabilityInventory {

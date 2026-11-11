@@ -80,6 +80,7 @@ jobs:
           if test "$RUNNER_OS" = Windows; then suffix=".exe"; fi
           echo "PORTABLE_TEST_HELPER=$CARGO_TARGET_DIR/debug/examples/portable_test_helper$suffix" >> "$GITHUB_ENV"
           echo "WINDOWS_WORKER_TEST_HELPER=$CARGO_TARGET_DIR/debug/examples/windows_worker_fixture$suffix" >> "$GITHUB_ENV"
+          echo "MACOS_WORKER_TEST_HELPER=$CARGO_TARGET_DIR/debug/examples/macos_worker_fixture$suffix" >> "$GITHUB_ENV"
 
       - name: Test default features
         run: |
@@ -98,6 +99,14 @@ jobs:
         run: |
           umask 077
           cargo +1.99.1 test --locked --lib --all-features persistence:: -- --include-ignored
+
+      - name: Test synthetic macOS worker containment (no hardware)
+        if: runner.os == 'macOS'
+        run: |
+          cargo +1.99.1 build --locked --example macos_worker_fixture
+          cargo +1.99.1 test --locked --lib native::windows_worker -- --include-ignored
+          cargo +1.99.1 build --locked --all-features --example macos_worker_fixture
+          cargo +1.99.1 test --locked --all-features --lib native::windows_worker -- --include-ignored
 
       - name: Check formatting
         run: cargo +1.99.1 fmt --all -- --check

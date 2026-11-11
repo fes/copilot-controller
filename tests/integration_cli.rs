@@ -40,7 +40,31 @@ fn json_result(args: &[&str]) -> Value {
 #[test]
 fn inventory_and_doctor_are_truthful_and_never_action_ready() {
     let capabilities = json_result(&["capabilities"]);
-    assert_eq!(capabilities["hardware_backend_available"], cfg!(windows));
+    assert_eq!(
+        capabilities["hardware_backend_available"],
+        cfg!(windows)
+            || cfg!(all(
+                target_os = "macos",
+                target_arch = "aarch64",
+                any(feature = "micro-hid", feature = "akp03-hid")
+            ))
+    );
+    assert_eq!(
+        capabilities["micro_hid_probe_available"],
+        cfg!(all(
+            target_os = "macos",
+            target_arch = "aarch64",
+            feature = "micro-hid"
+        ))
+    );
+    assert_eq!(
+        capabilities["akp03_hid_probe_available"],
+        cfg!(all(
+            target_os = "macos",
+            target_arch = "aarch64",
+            feature = "akp03-hid"
+        ))
+    );
     assert_eq!(capabilities["ct_serial_probe_available"], cfg!(windows));
     assert_eq!(capabilities["firmware_execution_available"], false);
     assert_eq!(capabilities["runtime_owner_acquired"], false);
@@ -248,7 +272,7 @@ fn hid_cli_validation_and_hidden_routes_never_emit_success_output() {
     assert!(text.contains("akp03-probe"));
     assert!(!text.contains("__probe-worker"));
     assert!(!text.contains("__akp03-worker"));
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     for args in [
         vec!["micro-probe", "--capture-ms", "0"],
         vec!["micro-probe", "--query", "--read-keymap", "--test-pattern"],
@@ -291,7 +315,7 @@ fn hid_health_is_feature_independent_and_reports_zero_device_io() {
         assert_eq!(value["report"]["output_reports"], 0);
         assert_eq!(value["report"]["output_bytes"], 0);
         assert_eq!(value["report"]["captures"], json!([]));
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
         {
             let args: Vec<_> = [command, "--health-check"]
                 .into_iter()
@@ -302,7 +326,10 @@ fn hid_health_is_feature_independent_and_reports_zero_device_io() {
     }
 }
 
-#[cfg(all(windows, any(not(feature = "micro-hid"), not(feature = "akp03-hid"))))]
+#[cfg(all(
+    any(windows, all(target_os = "macos", target_arch = "aarch64")),
+    any(not(feature = "micro-hid"), not(feature = "akp03-hid"))
+))]
 #[test]
 fn disabled_hid_cli_reports_fail_nonzero_without_native_backend_access() {
     let mut commands: Vec<&str> = Vec::new();
@@ -550,7 +577,7 @@ fn offline_api_never_reads_stdin_and_health_is_explicitly_platform_scoped() {
         let command = cli::parse(&args).unwrap();
         cli::execute(command, RefuseInput).unwrap();
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     {
         let output = invoke(&["probe-health"]);
         assert!(!output.status.success());
@@ -560,6 +587,17 @@ fn offline_api_never_reads_stdin_and_health_is_explicitly_platform_scoped() {
                 .unwrap()
                 .contains("UnsupportedPlatform")
         );
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let output = invoke(&["probe-health"]);
+        assert!(output.status.success(), "{:?}", output.stderr);
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["command_ready"], false);
+        assert_eq!(value["health"]["process_group"], true);
+        assert_eq!(value["health"]["pid"], value["health"]["pgid"]);
+        assert_eq!(value["health"]["parent_death_guarantee"], false);
+        assert_eq!(value["health"]["escape_guarantee"], false);
     }
     #[cfg(windows)]
     {

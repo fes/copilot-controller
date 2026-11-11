@@ -52,18 +52,21 @@ Usage: copilot-controller <command>
               [--test-pattern] [--health-check]
   micro-firmware-plan --image <absolute-file> --esptool <absolute-file>
                       (offline pinned-file validation; micro-firmware feature)
-  probe-health (contained Windows worker only)
+  probe-health (contained Windows/macOS ARM64 worker)
   ct-probe [--schema-version 1] [--total-timeout-ms <1000..8000>]
            [--io-timeout-ms <100..1500>] [--capture-ms <0..5000>]
            [--max-events <1..128>] [--max-received-bytes <256..32768>]
            [--test-pattern] (explicit contained Windows serial diagnostic)
 
 All previews and probes are not ready or hardware-qualified. Native probes use
-contained Windows workers only. HID capture defaults to 2000 ms. Micro keymap
+contained Windows workers or macOS ARM64 HID workers. CT remains Windows-only.
+HID capture defaults to 2000 ms. Micro keymap
 and LED test require --query; AKP03 display test requires --initialize.
 --health-check conflicts with these opt-ins and performs no device access.
 Windows HID descriptor evidence is unavailable, so HID live probes fail closed;
-macOS live probes/writes and firmware execution remain unavailable.
+macOS HID requires its device feature and exact native descriptor evidence;
+IOKit access/writes require the private supervised-child capability. Linux live
+probes and firmware execution remain unavailable. No hardware acceptance claimed.
 Doctor observes the native clock and read-only
 process/desktop metadata where supported; it never discovers or opens devices.
 No runtime or terminal actions are exposed.";
@@ -369,10 +372,10 @@ fn capabilities() -> Value {
         "qualification": "foundation_only",
         "inventory": portable_inventory(),
         "offline_codecs": ["micro", "akp03-original", "akp03e-rev2", "ct-pid-0003"],
-        "hardware_backend_available": cfg!(windows),
+        "hardware_backend_available": cfg!(windows) || cfg!(all(target_os = "macos", target_arch = "aarch64", any(feature = "micro-hid", feature = "akp03-hid"))),
         "ct_serial_probe_available": cfg!(windows),
-        "micro_hid_probe_available": false,
-        "akp03_hid_probe_available": false,
+        "micro_hid_probe_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "micro-hid")),
+        "akp03_hid_probe_available": cfg!(all(target_os = "macos", target_arch = "aarch64", feature = "akp03-hid")),
         "firmware_execution_available": false,
         "runtime_owner_acquired": false,
         "state_store_api_available": cfg!(any(target_os = "linux", target_os = "macos")),
@@ -382,8 +385,8 @@ fn capabilities() -> Value {
             "micro_hid": cfg!(feature = "micro-hid"),
             "micro_firmware": cfg!(feature = "micro-firmware"),
         },
-        "limitations": ["Native CLI probing requires explicit opt-in and a contained Windows worker; no probe supplies action readiness or physical qualification.",
-            "Micro/AKP03 live probes fail closed without device-specific features and required native descriptor evidence; Windows HID evidence is unavailable, and macOS has no contained diagnostic worker.",
+        "limitations": ["Availability is compile-time support, not native evidence or hardware acceptance. Native CLI probing requires explicit opt-in and a contained Windows or macOS ARM64 worker; CT remains Windows-only.",
+            "Micro/AKP03 live probes fail closed without device-specific features and exact native descriptor evidence. Windows HID evidence is unavailable. macOS process groups have no parent-death or escape guarantee; IOKit access requires a private child capability and same-executable parent.",
             "Micro/AKP03 health checks perform no device access and do not require HID features."],
     })
 }
@@ -402,8 +405,9 @@ fn export(candidate: &CandidateAssignment, path: PathBuf) -> Result<(), String> 
 
 /// Execute an already validated offline route. Only assignment reads stdin,
 /// only confirmed assignment export mutates files. Native probes launch
-/// compiled-in contained diagnostic workers (on Windows). HID health checks
-/// have a pure no-I/O path on other platforms; no live-I/O fallback exists.
+/// compiled-in contained diagnostic workers (Windows or macOS ARM64 HID).
+/// HID health checks have a pure no-I/O path on other platforms; no live-I/O
+/// fallback exists.
 pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
     match command {
         Command::Help => Ok(Output::Text(HELP.into())),
@@ -662,6 +666,13 @@ fn health_callback(payload: Value) -> Result<Value, worker::DiagnosticCallbackEr
             "read_only": true, "command_ready": false, "w2_qualified": false,
         }))
     }
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        worker::worker_health()
+    }
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     Err(worker::DiagnosticCallbackError)
 }
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use hid_probe::validate_worker_options;

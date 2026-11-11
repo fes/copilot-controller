@@ -3,9 +3,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(any(windows, test))]
 use serde_json::Value;
 
-use super::{WorkerErrorKind, protocol::Outcome};
+use super::WorkerErrorKind;
+#[cfg(any(windows, test))]
+use super::protocol::Outcome;
 
 pub(super) struct SupervisorGate {
     active: Mutex<()>,
@@ -38,6 +41,7 @@ impl SupervisorGate {
 }
 
 #[derive(Default)]
+#[cfg(any(windows, test))]
 pub(super) struct Progress {
     pub send: Option<Result<(), WorkerErrorKind>>,
     pub response: Option<Result<Outcome, WorkerErrorKind>>,
@@ -45,6 +49,7 @@ pub(super) struct Progress {
     pub exit: Option<Result<u32, WorkerErrorKind>>,
 }
 
+#[cfg(any(windows, test))]
 impl Progress {
     pub fn decide(
         &mut self,

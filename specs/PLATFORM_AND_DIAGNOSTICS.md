@@ -66,6 +66,7 @@ Each support entry is one of:
 | Process/window/desktop/serial observations | Implemented | Unsupported | Unsupported | Unsupported |
 | Explicit process/UI/console qualification probes | Implemented | Unsupported | Unsupported | Unsupported |
 | Framed, Job-contained diagnostic workers | Implemented | Unsupported | Unsupported | Unsupported |
+| Framed, process-group HID/health workers | Unsupported | Unsupported | Compiled ARM64 | Unsupported |
 
 Clock prerequisites: nonnil runtime epoch, same native source, same boot.
 
@@ -612,7 +613,7 @@ Report includes sorted member identities INCLUDING helper, target/helper, option
 
 Console HWND can be message-only under pseudo-console hosting and is not a terminal-pane HWND. Two equal lists are not atomic membership lease. No screen read or input opening.
 
-## 8. Framed Windows disposable-worker service
+## 8. Framed disposable-worker service
 
 ### 8.1 Admission
 
@@ -636,7 +637,10 @@ Timeout **1ms through120s inclusive**. Check order:
 4. Bounded encoding.
 5. Platform dispatch.
 
-Non-Windows valid request returns unsupported-platform after these earlier checks. Non-Windows worker service does not invoke callback.
+Windows uses the Job service below. macOS ARM64 additionally admits only health,
+Micro and AKP03 requests (§8.7), validating complete typed HID options before
+spawn. Other non-Windows targets return unsupported-platform after these checks
+without invoking callbacks. CT remains Windows-only.
 
 ### 8.2 Exact framing
 
@@ -698,7 +702,7 @@ Envelope/request/worker records reject unknown fields. Arbitrary payload does no
 
 Require response version1, matching nonce, exact retained PID AND creation time. Nonce is accidental-mixup protection, not cryptographic same-user authentication.
 
-### 8.3 Containment and startup
+### 8.3 Windows containment and startup
 
 One active probe per supervisor process, acquired nonblocking:
 
@@ -800,6 +804,61 @@ Failure precedence matters:
   as `transport` or `frame_limit`.
 - Stdout `not-a-frame` -> `frame_limit`, as first four bytes decode as excessive length.
 - Nonzero exit -> `worker_failed` only once required pipe results/drain are available; earlier transport/protocol failures can win.
+
+### 8.7 macOS ARM64 HID/health platform block
+
+The existing Rust executable uses the exact hidden `__probe-worker` and
+AKP03-only `__akp03-worker` routes, the same static registries, protocol version,
+65536-byte frame, 65280-byte callback budget, and 16384-byte discarded-stderr
+limit. Hidden routing rejects extra arguments. Parent and child both reject
+unsupported kinds and malformed/unknown/missing typed options; the child also
+requires one entire frame and EOF, rejects duplicate JSON keys, and rechecks
+the route's allowlist before invoking any callback. No CT or Linux live route
+is added.
+
+The parent spawns only `current_exe` with `process_group(0)` and three pipes.
+It verifies child PGID == PID and retains the native `proc_bsdinfo` PID/start
+time. The existing `creation_time_100ns` field carries Unix-epoch process start
+time on macOS, not Windows FILETIME. Response version, nonce, PID and this
+native start time must all match.
+
+Nonblocking parent I/O pumps bounded stdin, stdout and discarded stderr without
+I/O threads, polling every 5 ms. Deadline includes spawn, input, callback,
+response, EOF and exit observation. Micro deadlines are capture+20000 ms,
+another 5000 ms for keymap; AKP03 is capture+15000 ms; health is 3000 ms.
+A caller may shorten but not extend these device-spec budgets. Success requires
+complete send, both output EOFs, valid correlated outcome, zero exit and cleanup.
+
+On failure, timeout, cancellation or output overflow, reuse the Unix group
+guard: WNOWAIT reserves the leader PID, signal its group with SIGKILL **before**
+reaping, and allow up to 2 seconds per cleanup attempt (Drop may retry once,
+up to 4 seconds total after failure). This also occurs on success to
+dispose of any remaining group members. The macOS sole-zombie-group check handles
+EPERM conservatively. Parent pipes are explicitly closed; no I/O tasks survive.
+Unconfirmed signal/reap or ambiguous close returns `cleanup_unconfirmed`,
+forbids replacement and stickily blocks the process-local supervisor. A previous
+portable-child cleanup uncertainty also blocks this service.
+
+The child checks PGID == PID and that all three standard descriptors are pipes,
+then acquires close-on-exec duplicates. Only after full request validation can
+it establish a private thread-bound, per-request HID capability. Native access
+additionally requires the parent process image path to equal the current
+executable. Ordinary in-process `native_backend()` calls fail with typed
+`UnsupervisedAccess`; health gets no HID capability and never constructs a
+backend, enumerates or opens. IOKit enumeration/open/descriptor/read and output
+check the capability. A stale capability cannot revive in another request.
+Numbered output retains its report ID; unnumbered output strips the synthetic
+zero. Synchronous `IOHIDDeviceSetReport` has no individual write deadline:
+only the supervised child's lifetime is bounded. Reopened identity is reread
+from native properties; unavailable or mismatching evidence fails closed.
+
+This is trusted-code liveness containment, not hostile-code/same-user
+authentication, parent-death containment, an escape-proof sandbox, proof of
+physical output cleanup, or device qualification. No hardware was accessed.
+IOKit property/descriptor and physical input/output behavior remain unverified.
+Standalone doctor discovery remains unavailable; diagnostic metadata is obtained
+only inside the explicit HID probe child. Windows Job behavior and its existing
+evidence/runtime limitations are unchanged.
 
 ## 9. Portable bounded stdio diagnostics
 

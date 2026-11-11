@@ -2,9 +2,9 @@
 //! All raw FFI is private to this file. Not validated against hardware.
 //!
 //! Input reports are delivered through a run-loop callback on the thread that
-//! opened the device (the transport is therefore `!Send`). Writes are deliberately
-//! unavailable: `IOHIDDeviceSetReport` is synchronous with no caller deadline and
-//! no supervised worker exists on macOS, so no write FFI is declared here.
+//! opened the device (the transport is therefore `!Send`). Every live operation
+//! requires a private, thread-bound worker capability. Synchronous output has no
+//! individual deadline; the supervised parent can kill and reap the child.
 
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_void};
@@ -65,6 +65,13 @@ unsafe extern "C" {
     fn IOHIDDeviceGetService(d: CFTypeRef) -> u32;
     fn IOHIDDeviceOpen(d: CFTypeRef, options: u32) -> IOReturn;
     fn IOHIDDeviceClose(d: CFTypeRef, options: u32) -> IOReturn;
+    fn IOHIDDeviceSetReport(
+        d: CFTypeRef,
+        ty: u32,
+        id: CFIndex,
+        report: *const u8,
+        len: CFIndex,
+    ) -> IOReturn;
     fn IOHIDDeviceRegisterInputReportCallback(
         d: CFTypeRef,
         report: *mut u8,
@@ -208,13 +215,22 @@ impl Matched {
     }
 }
 
-pub(super) struct IoKitHid;
+pub(super) struct IoKitHid {
+    capability: crate::native::windows_worker::HidWorkerCapability,
+}
 
 fn path_for(id: u64) -> String {
     format!("iokit:{id}")
 }
 
 fn describe(dev: CFTypeRef, identity: HidIdentity) -> Option<HidDescriptor> {
+    let actual = HidIdentity {
+        vendor_id: u16::try_from(prop_i32(dev, "VendorID")?).ok()?,
+        product_id: u16::try_from(prop_i32(dev, "ProductID")?).ok()?,
+    };
+    if actual != identity {
+        return None;
+    }
     let id = entry_id(dev)?;
     let size = |k| {
         prop_i32(dev, k)
@@ -264,6 +280,7 @@ fn same_open_identity(
 
 impl HidBackend for IoKitHid {
     fn enumerate(&self, m: &HidMatcher, limit: usize) -> Result<Vec<HidDescriptor>, HidError> {
+        self.authorize()?;
         let matched = match Matched::new(m.identity) {
             Ok(x) => x,
             Err(HidError::NotFound) => return Ok(Vec::new()),
@@ -297,11 +314,26 @@ impl HidBackend for IoKitHid {
 }
 
 impl IoKitHid {
+    pub(super) fn new() -> Result<Self, HidError> {
+        let capability = crate::native::windows_worker::hid_worker_capability()
+            .ok_or(HidError::Unavailable(UnavailableReason::UnsupervisedAccess))?;
+        Ok(Self { capability })
+    }
+
+    fn authorize(&self) -> Result<(), HidError> {
+        if self.capability.valid() {
+            Ok(())
+        } else {
+            Err(HidError::Unavailable(UnavailableReason::UnsupervisedAccess))
+        }
+    }
+
     fn open_with_policy(
         &self,
         d: &HidDescriptor,
         allow_usage_change: bool,
     ) -> Result<Box<dyn HidTransport>, HidError> {
+        self.authorize()?;
         let matched = Matched::new(d.identity)?;
         let dev = matched
             .devices()?
@@ -321,6 +353,12 @@ impl IoKitHid {
                 op: HidOp::Open,
                 code: i64::from(r),
             });
+        }
+        if !describe(dev.0, d.identity)
+            .is_some_and(|reopened| same_open_identity(&reopened, d, allow_usage_change))
+        {
+            unsafe { IOHIDDeviceClose(dev.0, 0) };
+            return Err(HidError::NotFound);
         }
         let mut state = Box::new(InputState {
             buf: vec![0u8; MAX_REPORT_LEN],
@@ -346,6 +384,7 @@ impl IoKitHid {
             run_loop: unsafe { CFRunLoopGetCurrent() },
             state,
             report_descriptor,
+            capability: self.capability.clone(),
         }))
     }
 }
@@ -396,6 +435,7 @@ struct MacTransport {
     run_loop: CFTypeRef,
     state: Box<InputState>,
     report_descriptor: Option<Vec<u8>>,
+    capability: crate::native::windows_worker::HidWorkerCapability,
 }
 
 fn original_report_descriptor(dev: CFTypeRef) -> Option<Vec<u8>> {
@@ -436,14 +476,22 @@ impl Drop for MacTransport {
 
 impl HidTransport for MacTransport {
     fn supports_write(&self) -> bool {
-        false
+        self.capability.valid()
     }
 
-    fn write(&mut self, _report: &[u8]) -> Result<usize, HidError> {
-        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    fn write(&mut self, report: &[u8]) -> Result<usize, HidError> {
+        output_report(&self.capability, report, |id, bytes| {
+            // The capability is checked immediately before this synchronous FFI.
+            unsafe {
+                IOHIDDeviceSetReport(self.dev.0, 1, id, bytes.as_ptr(), bytes.len() as CFIndex)
+            }
+        })
     }
 
     fn read(&mut self, out: &mut [u8], timeout: Duration) -> Result<usize, HidError> {
+        if !self.capability.valid() {
+            return Err(HidError::Unavailable(UnavailableReason::UnsupervisedAccess));
+        }
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(r) = self.state.queue.pop_front() {
@@ -461,10 +509,48 @@ impl HidTransport for MacTransport {
     }
 
     fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        if !self.capability.valid() {
+            return Err(HidError::Unavailable(UnavailableReason::UnsupervisedAccess));
+        }
         self.report_descriptor
             .clone()
             .ok_or(HidError::EvidenceUnavailable(
                 EvidenceKind::RawReportDescriptor,
             ))
     }
+}
+
+fn output_report(
+    capability: &crate::native::windows_worker::HidWorkerCapability,
+    report: &[u8],
+    set_report: impl FnOnce(CFIndex, &[u8]) -> IOReturn,
+) -> Result<usize, HidError> {
+    if !capability.valid() {
+        return Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite));
+    }
+    let Some(&id) = report.first() else {
+        return Err(HidError::InvalidArgument(ArgumentError::EmptyReport));
+    };
+    if report.len() > MAX_REPORT_LEN {
+        return Err(HidError::InvalidArgument(ArgumentError::ReportTooLarge));
+    }
+    // IOKit includes numbered IDs in the report but not the synthetic zero ID.
+    let bytes = if id == 0 { &report[1..] } else { report };
+    let result = set_report(CFIndex::from(id), bytes);
+    if result != 0 {
+        return Err(HidError::Os {
+            op: HidOp::Write,
+            code: i64::from(result),
+        });
+    }
+    Ok(report.len())
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_output(
+    capability: &crate::native::windows_worker::HidWorkerCapability,
+    report: &[u8],
+    set_report: impl FnOnce(isize, &[u8]) -> i32,
+) -> Result<usize, HidError> {
+    output_report(capability, report, set_report)
 }

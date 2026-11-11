@@ -1179,29 +1179,36 @@ fails native probing; health check works without either.
 `--health-check` flags. Unknown, repeated, missing or malformed options, test
 without initialize, and health/write conflicts fail before worker launch.
 
-The named private `__akp03-worker` route reuses the existing same-executable
-Windows bounded-stdio supervisor, not a new process host or transport.
+The named private `__akp03-worker` route reuses the same-executable
+bounded-stdio service (Windows Job or macOS ARM64 process group).
 It receives a complete framed options object under kind `akp03_hid_probe`,
 rather than unframed command-line options. Its static allowlist authorizes only
 AKP03; no health, CT, Micro, arbitrary command, path or selector is admitted.
 The shared `__probe-worker` diagnostic registry also recognizes the AKP03
 callback. Both routes stay hidden from help and reject extra arguments.
 Duplicate frame keys and unknown/missing typed option/result fields fail
-closed. Live callbacks require detached, one-process kill-on-close Job
-containment before backend construction. Only the child can enumerate/open HID.
+closed. Live callbacks require detached, one-process kill-on-close Windows Job
+containment or the macOS private process-group worker capability before backend
+construction. Only the child can enumerate/open HID.
 The outcome also includes `hardware_qualified=false`; neither readiness nor
 qualification can be asserted by a worker. Read-only must equal `!initialize`,
 and at most 128 captures are admitted, without independently validating every
 progress field. Failed reports go to stderr with nonzero CLI status.
 
 Health uses no backend/transport and requires no feature. Where there is no
-Windows supervisor, only this pure no-I/O report runs in-process; live access
+Windows/macOS ARM64 supervisor, only this pure no-I/O report runs in-process; live access
 has no fallback. Native probes require `akp03-hid`, but Windows currently lacks
 the required native interface number/raw descriptor and therefore fails closed
-before reports. macOS live CLI probes remain unavailable and macOS native writes
-remain disabled because no bounded diagnostic worker is integrated.
-Existing failure cleanup may additionally wait up to five seconds for exit and
-one for I/O joining; unconfirmed cleanup fences replacement.
+before reports. macOS ARM64 now supports the exact route through the bounded
+process-group child. All IOKit access, including synchronous output, requires
+the private scoped capability and same-executable parent; public in-process
+native access fails closed. Native properties/exact descriptors remain required
+and unverified on hardware. Process groups provide no parent-death/escape
+guarantee. See platform appendix §8.7.
+Windows failure cleanup may additionally wait up to five seconds for exit and
+one for I/O joining; macOS group cleanup allows two seconds per attempt (Drop
+may retry once) and closes pipes
+synchronously. Unconfirmed cleanup fences replacement.
 
 Result budgeting occurs only after native acquisition/output finishes. Compact
 payloads are limited to 65280 bytes, leaving 256 bytes inside the unchanged

@@ -653,7 +653,7 @@ fn oversized_request_fails_before_platform_dispatch() {
     assert!(error.replacement_allowed);
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
 #[test]
 fn unsupported_platform_does_not_invoke_callbacks() {
     CALLBACK_COUNT.store(0, Ordering::SeqCst);

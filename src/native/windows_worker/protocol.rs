@@ -1,16 +1,18 @@
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 use std::io::Read;
 use std::io::{self, Write};
 
 use serde::Serialize;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 use serde::{Deserialize, de::DeserializeOwned};
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 use serde_json::Value;
 use uuid::Uuid;
 
 #[cfg(any(windows, test))]
-use super::{DiagnosticAllowlist, DiagnosticCallbackFn, MAX_DIAGNOSTIC_BYTES, WorkerIdentity};
+use super::MAX_DIAGNOSTIC_BYTES;
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
+use super::{DiagnosticAllowlist, DiagnosticCallbackFn, WorkerIdentity};
 use super::{DiagnosticRequest, MAX_FRAME_BODY_BYTES, WorkerErrorKind};
 
 pub(super) const VERSION: u32 = 1;
@@ -22,7 +24,7 @@ pub(super) struct RequestEnvelopeRef<'a> {
     pub request: &'a DiagnosticRequest,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RequestEnvelope {
@@ -31,7 +33,7 @@ pub(super) struct RequestEnvelope {
     pub request: DiagnosticRequest,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ResponseEnvelope {
@@ -41,7 +43,7 @@ pub(super) struct ResponseEnvelope {
     pub outcome: Outcome,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(super) enum Outcome {
@@ -50,7 +52,7 @@ pub(super) enum Outcome {
     ResponseEncodingFailed,
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 pub(super) fn invoke_callback(callback: DiagnosticCallbackFn, payload: Value) -> Outcome {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(payload))) {
         Ok(Ok(payload)) => Outcome::Ok { payload },
@@ -73,7 +75,7 @@ pub(super) fn valid_kind(kind: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(byte))
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 pub(super) fn validate_request(
     envelope: &RequestEnvelope,
     allowlist: &DiagnosticAllowlist,
@@ -88,7 +90,7 @@ pub(super) fn validate_request(
     Ok(())
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 pub(super) fn validate_response(
     envelope: ResponseEnvelope,
     nonce: Uuid,
@@ -131,7 +133,7 @@ pub(super) fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>, WorkerErr
     Ok(frame.bytes)
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 pub(super) fn encode_response(
     outcome: &impl Serialize,
     request_nonce: Uuid,
@@ -162,7 +164,7 @@ pub(super) fn encode_response(
     })
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 pub(super) fn read_frame<R: Read, T: DeserializeOwned>(
     reader: &mut R,
 ) -> Result<T, WorkerErrorKind> {
@@ -194,10 +196,10 @@ pub(super) fn read_frame<R: Read, T: DeserializeOwned>(
     serde_json::from_slice(&body).map_err(|_| WorkerErrorKind::Protocol)
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 struct UniqueKeys;
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 impl<'de> Deserialize<'de> for UniqueKeys {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;

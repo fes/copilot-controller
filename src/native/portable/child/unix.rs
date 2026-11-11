@@ -105,7 +105,7 @@ fn confirm_cleanup(guard: &mut GroupGuard) -> Result<ExitStatus, ChildErrorKind>
     })
 }
 
-fn make_nonblocking(stdout: &ChildStdout, deadline: Instant) -> io::Result<()> {
+pub(crate) fn make_nonblocking(stdout: &impl AsRawFd, deadline: Instant) -> io::Result<()> {
     let fd = stdout.as_raw_fd();
     let flags = fcntl_retry(fd, libc::F_GETFL, 0, deadline)?;
     fcntl_retry(fd, libc::F_SETFL, flags | libc::O_NONBLOCK, deadline)?;
@@ -151,7 +151,7 @@ fn drain(stdout: &mut ChildStdout, output: &mut Vec<u8>) -> Result<bool, ChildEr
 }
 
 /// WNOWAIT keeps the group leader's PID reserved until after group signaling.
-fn peek_exited(pid: libc::pid_t, deadline: Instant) -> io::Result<bool> {
+pub(crate) fn peek_exited(pid: libc::pid_t, deadline: Instant) -> io::Result<bool> {
     loop {
         // A zeroed siginfo also makes the WNOHANG/no-event case unambiguous.
         let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
@@ -181,15 +181,25 @@ fn peek_exited(pid: libc::pid_t, deadline: Instant) -> io::Result<bool> {
     }
 }
 
-struct GroupGuard {
-    child: Child,
+pub(crate) struct GroupGuard {
+    pub(crate) child: Child,
     pid: libc::pid_t,
     group_signaled: bool,
     status: Option<ExitStatus>,
 }
 
 impl GroupGuard {
-    fn finish(&mut self) -> Result<ExitStatus, ()> {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn new(child: Child, pid: libc::pid_t) -> Self {
+        Self {
+            child,
+            pid,
+            group_signaled: false,
+            status: None,
+        }
+    }
+
+    pub(crate) fn finish(&mut self) -> Result<ExitStatus, ()> {
         if let Some(status) = self.status {
             return Ok(status);
         }

@@ -57,6 +57,8 @@ pub fn cleanup_blocked() -> bool {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "child/unix.rs"]
 mod implementation;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use implementation::{GroupGuard, make_nonblocking, peek_exited};
 #[cfg(windows)]
 #[path = "child/windows.rs"]
 mod implementation;

@@ -1,4 +1,4 @@
-//! A contained, one-shot Windows diagnostic-worker transport.
+//! Contained, one-shot Windows and macOS ARM64 diagnostic workers.
 //!
 //! The executable supplies a static allowlist of diagnostic callbacks and routes
 //! [`HIDDEN_WORKER_ARGUMENT`] (or the fixed AKP03 route) to
@@ -18,11 +18,21 @@ use serde_json::Value;
 #[cfg(not(windows))]
 use uuid::Uuid;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod macos;
 mod protocol;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
 mod supervision;
 #[cfg(windows)]
 mod windows;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use macos::worker_health;
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    any(feature = "micro-hid", feature = "akp03-hid")
+))]
+pub(crate) use macos::{HidWorkerCapability, hid_worker_capability};
 
 #[cfg(test)]
 mod tests;
@@ -70,6 +80,7 @@ pub struct DiagnosticRequest {
 #[serde(deny_unknown_fields)]
 pub struct WorkerIdentity {
     pub pid: u32,
+    /// Windows FILETIME; on macOS, native process start time since Unix epoch.
     pub creation_time_100ns: u64,
 }
 
@@ -126,7 +137,7 @@ impl WorkerError {
         }
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64"), test))]
     fn after_launch(
         kind: WorkerErrorKind,
         worker: Option<WorkerIdentity>,
@@ -212,8 +223,8 @@ impl DiagnosticAllowlist {
 /// Validate and perform a single diagnostic probe.
 ///
 /// Timeout, prelaunch cancellation, request/allowlist validation and bounded
-/// encoding occur in that order before platform dispatch. On non-Windows a
-/// valid request returns `UnsupportedPlatform` without calling a callback.
+/// encoding occur before platform dispatch. macOS ARM64 admits only health,
+/// Micro and AKP03 diagnostics; other non-Windows targets fail closed.
 pub fn probe(
     request: &DiagnosticRequest,
     timeout: Duration,
@@ -234,8 +245,9 @@ pub fn probe(
 
     #[cfg(windows)]
     let nonce = windows::new_nonce().map_err(WorkerError::before_launch)?;
-    // The non-Windows envelope is only encoded and discarded; no worker exists.
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let nonce = Uuid::new_v4();
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     let nonce = Uuid::from_u128(1);
 
     let frame = protocol::encode_frame(&protocol::RequestEnvelopeRef {
@@ -249,7 +261,19 @@ pub fn probe(
     {
         windows::supervise(frame, nonce, timeout, cancelled, allowlist.route)
     }
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let budget =
+            macos::validate_platform_request(request).map_err(WorkerError::before_launch)?;
+        macos::supervise(
+            frame,
+            nonce,
+            timeout.min(budget),
+            cancelled,
+            allowlist.route,
+        )
+    }
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     {
         let _ = (frame, nonce);
         Err(WorkerError::before_launch(Kind::UnsupportedPlatform))
@@ -282,7 +306,11 @@ where
     {
         Some(windows::worker_main(allowlist))
     }
-    #[cfg(not(windows))]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        Some(macos::worker_main(allowlist))
+    }
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     {
         let _ = allowlist;
         Some(Err(WorkerError::before_launch(

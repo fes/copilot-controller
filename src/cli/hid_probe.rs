@@ -257,7 +257,7 @@ pub(super) fn parse(args: &[String], micro: bool) -> Result<Options, String> {
 pub(super) fn execute(options: Options) -> Result<Output, String> {
     // Health has no native dependency. Where there is no contained worker,
     // return only the pure health result, never an in-process live-I/O fallback.
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     if options.health_check() {
         options.validate()?;
         return output(options.health_outcome(), &options);
@@ -351,6 +351,7 @@ fn decode_options(payload: Value, micro: bool) -> Result<Options, worker::Diagno
     if object.len() != fields.len() || !fields.iter().all(|field| object.contains_key(*field)) {
         return Err(worker::DiagnosticCallbackError);
     }
+
     let options = if micro {
         Options::Micro(
             serde_json::from_value(payload).map_err(|_| worker::DiagnosticCallbackError)?,
@@ -364,6 +365,14 @@ fn decode_options(payload: Value, micro: bool) -> Result<Options, worker::Diagno
         .validate()
         .map_err(|_| worker::DiagnosticCallbackError)?;
     Ok(options)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn validate_worker_options(
+    payload: Value,
+    micro: bool,
+) -> Result<Duration, worker::DiagnosticCallbackError> {
+    decode_options(payload, micro).map(|options| options.budget())
 }
 
 pub(super) fn micro_callback(payload: Value) -> Result<Value, worker::DiagnosticCallbackError> {
@@ -430,7 +439,7 @@ fn native_outcome(options: &Options) -> Outcome {
             "unavailable: device-specific HID feature is disabled".into(),
         );
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, all(target_os = "macos", target_arch = "aarch64")))]
     {
         let backend = match crate::native::hid::native_backend() {
             Ok(backend) => backend,
@@ -446,10 +455,10 @@ fn native_outcome(options: &Options) -> Outcome {
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
     unavailable(
         options,
-        "unavailable: contained HID worker requires Windows".into(),
+        "unavailable: contained HID worker requires Windows or macOS ARM64".into(),
     )
 }
 
