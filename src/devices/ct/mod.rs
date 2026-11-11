@@ -16,6 +16,7 @@
 pub mod controls;
 pub mod layout;
 pub mod pixels;
+pub mod probe;
 pub mod protocol;
 pub mod scene;
 pub mod text;
