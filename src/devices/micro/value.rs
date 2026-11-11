@@ -117,6 +117,13 @@ impl PartialEq<Value> for JsonValue {
 pub struct JsonObject(JsonValue);
 
 impl JsonObject {
+    /// Serialize replay data without recursive traversal or exposing internal
+    /// surrogate tokens.
+    pub fn to_pretty_json(&self) -> Result<String, super::error::MicroError> {
+        super::json::pretty_json(self.as_value(), 0)
+            .map_err(|_| super::error::MicroError::Serialization)
+    }
+
     pub fn from_map(map: Map<String, Value>) -> Self {
         Self(JsonValue::from_value(Value::Object(map)))
     }

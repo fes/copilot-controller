@@ -1,23 +1,23 @@
 use super::super::*;
 use super::{native_error, qualification::Backend};
 use ::windows::{
-    core::Interface,
     Win32::{
         Foundation::HWND,
         System::Com::{
-            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-            COINIT_MULTITHREADED,
+            CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+            CoUninitialize,
         },
         UI::Accessibility::{
             CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationTreeWalker,
         },
     },
+    core::Interface,
 };
 use std::ffi::c_void;
 use windows_sys::Win32::{
     System::Threading::GetCurrentProcessId,
     UI::WindowsAndMessaging::{
-        GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, IsWindow, GA_ROOT,
+        GA_ROOT, GetAncestor, GetForegroundWindow, GetWindowThreadProcessId, IsWindow,
     },
 };
 

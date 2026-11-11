@@ -1,18 +1,17 @@
 use super::super::{
-    qualification::{collect_image_file, ImageFileBackend, ImageFileRecord},
     ImageFileEvidence, PlatformResult,
+    qualification::{ImageFileBackend, ImageFileRecord, collect_image_file},
 };
 use super::{
-    last_error,
-    process::{check_running, image_path, HeldProcess},
-    Handle,
+    Handle, last_error,
+    process::{HeldProcess, check_running, image_path},
 };
 use std::ptr;
 use windows_sys::Win32::{
     Foundation::{FILETIME, INVALID_HANDLE_VALUE},
     Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ, OPEN_EXISTING,
+        BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        GetFileInformationByHandle, OPEN_EXISTING,
     },
 };
 

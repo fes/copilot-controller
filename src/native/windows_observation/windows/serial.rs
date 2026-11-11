@@ -1,26 +1,26 @@
 use super::super::{
-    collect_serial, configuration_manager_error, decode_registry_multi_sz, decode_registry_sz,
     ErrorKind, Observation, PlatformError, PlatformResult, SerialBackend, SerialSelection,
+    collect_serial, configuration_manager_error, decode_registry_multi_sz, decode_registry_sz,
 };
 use super::{last_error, native_error};
 use std::{mem, ptr};
 use windows_sys::{
-    core::GUID,
     Win32::{
         Devices::DeviceAndDriverInstallation::{
-            CM_Get_DevNode_Registry_PropertyW, CM_Get_Parent, CM_Locate_DevNodeW,
+            CM_DRP_HARDWAREID, CM_Get_DevNode_Registry_PropertyW, CM_Get_Parent,
+            CM_LOCATE_DEVNODE_NORMAL, CM_Locate_DevNodeW, CR_NO_SUCH_VALUE, CR_SUCCESS,
+            DICS_FLAG_GLOBAL, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, DIREG_DEV, HDEVINFO,
+            SP_DEVICE_INTERFACE_DATA, SP_DEVINFO_DATA, SPINT_ACTIVE, SPINT_REMOVED,
             SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
-            SetupDiGetDeviceInterfaceDetailW, SetupDiOpenDevRegKey, CM_DRP_HARDWAREID,
-            CM_LOCATE_DEVNODE_NORMAL, CR_NO_SUCH_VALUE, CR_SUCCESS, DICS_FLAG_GLOBAL,
-            DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, DIREG_DEV, HDEVINFO, SPINT_ACTIVE, SPINT_REMOVED,
-            SP_DEVICE_INTERFACE_DATA, SP_DEVINFO_DATA,
+            SetupDiGetDeviceInterfaceDetailW, SetupDiOpenDevRegKey,
         },
         Foundation::{
-            GetLastError, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA,
-            ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, INVALID_HANDLE_VALUE,
+            ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS,
+            ERROR_SUCCESS, GetLastError, INVALID_HANDLE_VALUE,
         },
-        System::Registry::{RegCloseKey, RegQueryValueExW, HKEY, KEY_QUERY_VALUE},
+        System::Registry::{HKEY, KEY_QUERY_VALUE, RegCloseKey, RegQueryValueExW},
     },
+    core::GUID,
 };
 
 const COM_INTERFACE: GUID = GUID {

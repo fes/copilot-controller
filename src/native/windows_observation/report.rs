@@ -1,7 +1,7 @@
 use super::{
-    observe_clock, observe_current_process, observe_desktop, observe_foreground,
-    observe_process_inventory, observe_serial, ClockSample, DesktopContext, ExecutableNames,
-    ForegroundEvidence, Observation, ProcessEvidence, ProcessInventory, SerialSelection,
+    ClockSample, DesktopContext, ExecutableNames, ForegroundEvidence, Observation, ProcessEvidence,
+    ProcessInventory, SerialSelection, observe_clock, observe_current_process, observe_desktop,
+    observe_foreground, observe_process_inventory, observe_serial,
 };
 use serde::Serialize;
 use uuid::Uuid;

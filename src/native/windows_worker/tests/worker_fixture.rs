@@ -11,6 +11,11 @@ mod windows_fixture {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use copilot_controller::native::windows_worker::{
+        DiagnosticAllowlist, DiagnosticCallback, DiagnosticCallbackError, DiagnosticRequest,
+        DiagnosticResult, WorkerError, WorkerErrorKind, WorkerIdentity, maybe_run_hidden_worker,
+        probe,
+    };
     use serde_json::{Value, json};
     use windows_sys::Win32::Foundation::{
         ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, FILETIME, GetLastError, HANDLE,
@@ -27,11 +32,6 @@ mod windows_fixture {
     use windows_sys::Win32::System::Threading::{
         CreateEventW, GetCurrentProcess, GetProcessHandleCount, GetProcessTimes, OpenProcess,
         PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, SetEvent, WaitForSingleObject,
-    };
-    use windows_worker_harness::{
-        DiagnosticAllowlist, DiagnosticCallback, DiagnosticCallbackError, DiagnosticRequest,
-        DiagnosticResult, WorkerError, WorkerErrorKind, WorkerIdentity, maybe_run_hidden_worker,
-        probe,
     };
 
     const KIND: &str = "fixture_diagnostic";

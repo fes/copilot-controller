@@ -43,10 +43,17 @@ fn compile_time_inventory_never_claims_unintegrated_or_qualified_features() {
     let inventory = portable_inventory();
     assert!(inventory.read_only());
     assert!(!inventory.command_ready());
-    assert!(matches!(
-        inventory.platform().safe_private_storage,
-        Support::Unavailable { .. }
-    ));
+    if cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert!(matches!(
+            inventory.platform().safe_private_storage,
+            Support::Compiled { .. }
+        ));
+    } else {
+        assert!(matches!(
+            inventory.platform().safe_private_storage,
+            Support::Unavailable { .. }
+        ));
+    }
     assert!(matches!(
         inventory.platform().cooperative_runtime_ownership,
         Support::Unavailable { .. }
@@ -55,12 +62,21 @@ fn compile_time_inventory_never_claims_unintegrated_or_qualified_features() {
         inventory.platform().lifecycle_notifications,
         Support::Unavailable { .. }
     ));
-    assert!(matches!(
-        inventory
-            .platform()
-            .process_window_desktop_serial_observations,
-        Support::Unavailable { .. }
-    ));
+    if cfg!(windows) {
+        assert!(matches!(
+            inventory
+                .platform()
+                .process_window_desktop_serial_observations,
+            Support::Compiled { .. }
+        ));
+    } else {
+        assert!(matches!(
+            inventory
+                .platform()
+                .process_window_desktop_serial_observations,
+            Support::Unavailable { .. }
+        ));
+    }
     assert!(matches!(inventory.actions(), Support::Unavailable { .. }));
     assert_eq!(inventory.devices().len(), 5);
     assert!(

@@ -362,7 +362,7 @@ fn conservative_token_context_checks_both_tokens() {
 
 #[test]
 fn synthetic_token_snapshots_detect_mutation_and_hide_identifiers() {
-    use super::qualification::{stable_security, TokenIds, TokenSnapshot};
+    use super::qualification::{TokenIds, TokenSnapshot, stable_security};
     let token = TokenContext {
         session_id: 3,
         integrity_rid: 0x2000,
@@ -520,9 +520,11 @@ fn serial_selection_preserves_ambiguity_and_discards_invalid_raw_values() {
         true,
     );
     assert_eq!(incomplete.state, SerialSelectionState::Incomplete);
-    assert!(!serde_json::to_string(&incomplete)
-        .unwrap()
-        .contains("secret"));
+    assert!(
+        !serde_json::to_string(&incomplete)
+            .unwrap()
+            .contains("secret")
+    );
     assert_eq!(
         select_serial(&[], false).state,
         SerialSelectionState::Incomplete
@@ -557,9 +559,11 @@ fn strict_registry_decoders_reject_hidden_or_malformed_data() {
         decode_registry_multi_sz(7, &little_endian(&[65, 0, 66, 0, 0])).unwrap(),
         ["A", "B"]
     );
-    assert!(decode_registry_multi_sz(7, &little_endian(&[0, 0]))
-        .unwrap()
-        .is_empty());
+    assert!(
+        decode_registry_multi_sz(7, &little_endian(&[0, 0]))
+            .unwrap()
+            .is_empty()
+    );
     for units in [
         &[65, 0][..],
         &[65, 0, 0, 66, 0, 0][..],
@@ -574,12 +578,14 @@ fn strict_registry_decoders_reject_hidden_or_malformed_data() {
 
 #[test]
 fn exact_age_and_request_schema_boundaries() {
-    assert!(check_age(
-        stamp(100, 10_000_000),
-        stamp(200, 10_000_000),
-        Duration::from_secs(3)
-    )
-    .is_ok());
+    assert!(
+        check_age(
+            stamp(100, 10_000_000),
+            stamp(200, 10_000_000),
+            Duration::from_secs(3)
+        )
+        .is_ok()
+    );
     for now in [99, 100, 101] {
         assert_eq!(
             check_age(stamp(100, 10), stamp(now, 10), Duration::from_secs(3)),
@@ -599,12 +605,14 @@ fn exact_age_and_request_schema_boundaries() {
             Err(AgeError::ClockMismatch)
         );
     }
-    assert!(check_age(
-        stamp(0, 2_000_000_000),
-        stamp(6_000_000_000, 2_000_000_000),
-        Duration::from_secs(3)
-    )
-    .is_ok());
+    assert!(
+        check_age(
+            stamp(0, 2_000_000_000),
+            stamp(6_000_000_000, 2_000_000_000),
+            Duration::from_secs(3)
+        )
+        .is_ok()
+    );
     assert_eq!(
         check_age(
             stamp(0, 2_000_000_000),
@@ -613,26 +621,32 @@ fn exact_age_and_request_schema_boundaries() {
         ),
         Err(AgeError::StaleState)
     );
-    assert!(check_age(
-        stamp(0, u64::MAX),
-        stamp(u64::MAX, u64::MAX),
-        Duration::from_secs(1)
-    )
-    .is_ok());
-    assert!(check_probe_interval(
-        stamp(100, 10),
-        stamp(110, 10),
-        stamp(120, 10),
-        stamp(130, 10)
-    )
-    .is_ok());
-    assert!(check_probe_interval(
-        stamp(100, 10),
-        stamp(110, 10),
-        stamp(200, 10),
-        stamp(220, 10)
-    )
-    .is_ok());
+    assert!(
+        check_age(
+            stamp(0, u64::MAX),
+            stamp(u64::MAX, u64::MAX),
+            Duration::from_secs(1)
+        )
+        .is_ok()
+    );
+    assert!(
+        check_probe_interval(
+            stamp(100, 10),
+            stamp(110, 10),
+            stamp(120, 10),
+            stamp(130, 10)
+        )
+        .is_ok()
+    );
+    assert!(
+        check_probe_interval(
+            stamp(100, 10),
+            stamp(110, 10),
+            stamp(200, 10),
+            stamp(220, 10)
+        )
+        .is_ok()
+    );
     assert_eq!(
         check_probe_interval(
             stamp(100, 10),
@@ -665,17 +679,19 @@ fn exact_age_and_request_schema_boundaries() {
         serde_json::from_value::<ProcessRequest>(value.clone()).unwrap(),
         request
     );
-    assert!(validate_process_request(
-        &ProcessRequest {
-            target: ProcessIdentity {
-                session_id: 0,
-                ..identity()
+    assert!(
+        validate_process_request(
+            &ProcessRequest {
+                target: ProcessIdentity {
+                    session_id: 0,
+                    ..identity()
+                },
+                ..request.clone()
             },
-            ..request.clone()
-        },
-        stamp(102, 10)
-    )
-    .is_ok());
+            stamp(102, 10)
+        )
+        .is_ok()
+    );
     assert_eq!(
         validate_process_request(
             &ProcessRequest {
@@ -794,9 +810,11 @@ fn synthetic_image_comparison_checks_paths_before_open_and_detects_changes() {
     assert!(evidence.same_file_as_observer && evidence.path_file_stable_during_probe);
     assert_eq!(evidence.provenance, Provenance::Unverified);
     assert_eq!(image.opened, 2);
-    assert!(!serde_json::to_string(&evidence)
-        .unwrap()
-        .contains("private-image"));
+    assert!(
+        !serde_json::to_string(&evidence)
+            .unwrap()
+            .contains("private-image")
+    );
 
     let mut different_identity = fake_image();
     different_identity.records[1].index_low = 10;

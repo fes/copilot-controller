@@ -670,10 +670,17 @@ mod native {
     #[test]
     #[cfg(target_os = "macos")]
     fn storage_group_writable_ancestor_is_refused() {
-        let fixture = Fixture::new(Path::new(
-            "/Volumes/Storage/build/copilot-controller/fixtures",
-        ));
-        let file = fixture.0.join("events");
+        let base = std::env::var_os("SESSION_ENGINE_SAFE_FIXTURE_ROOT")
+            .expect("explicit engine fixture root");
+        let fixture = Fixture::new(Path::new(&base));
+        let group_writable = fixture.0.join("group-writable");
+        fs::DirBuilder::new()
+            .mode(0o770)
+            .create(&group_writable)
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&group_writable, fs::Permissions::from_mode(0o770)).unwrap();
+        let file = group_writable.join("events");
         fs::write(&file, bytes(r#"{"type":"abort","timestamp":1}"#)).unwrap();
         assert!(matches!(
             NativeBoundary.open(&file),

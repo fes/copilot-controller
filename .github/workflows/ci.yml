@@ -73,15 +73,25 @@ jobs:
       # Fixtures must use COPILOT_CONTROLLER_TEST_ROOT (or the explicitly
       # redirected temporary directory), create unique private children, and
       # use fake transports. Feature selection never authorizes hardware I/O.
+      - name: Build self-authored diagnostic fixtures
+        run: |
+          cargo +1.99.1 build --locked --examples --all-features
+          suffix=""
+          if test "$RUNNER_OS" = Windows; then suffix=".exe"; fi
+          echo "PORTABLE_TEST_HELPER=$CARGO_TARGET_DIR/debug/examples/portable_test_helper$suffix" >> "$GITHUB_ENV"
+          echo "WINDOWS_WORKER_TEST_HELPER=$CARGO_TARGET_DIR/debug/examples/windows_worker_fixture$suffix" >> "$GITHUB_ENV"
+
       - name: Test default features
         run: |
           umask 077
           cargo +1.99.1 test --locked --all-targets
+          cargo +1.99.1 test --locked --doc
 
       - name: Test all features
         run: |
           umask 077
           cargo +1.99.1 test --locked --all-targets --all-features
+          cargo +1.99.1 test --locked --doc --all-features
 
       - name: Check formatting
         run: cargo +1.99.1 fmt --all -- --check

@@ -147,20 +147,30 @@ pub fn portable_inventory() -> CapabilityInventory {
         unavailable("unsupported_platform")
     };
     let windows_observations = if cfg!(windows) {
-        unavailable("windows_observations_not_integrated")
+        Support::Compiled {
+            prerequisite: "explicit_read_only_api_supervised_helper_where_required",
+        }
     } else {
         unavailable("unsupported_platform")
     };
     let windows_workers = if cfg!(windows) {
-        unavailable("windows_job_worker_not_integrated")
+        Support::Compiled {
+            prerequisite: "contained_same_executable_diagnostic_allowlist",
+        }
     } else {
         unavailable("unsupported_platform")
     };
     let platform = PlatformSupport {
         shared_native_clock: clock,
         lifecycle_notifications: unavailable("native_lifecycle_subscriptions_unimplemented"),
-        safe_private_storage: unavailable("safe_root_not_integrated"),
-        cooperative_runtime_ownership: unavailable("safe_root_owner_not_integrated"),
+        safe_private_storage: if cfg!(any(target_os = "linux", target_os = "macos")) {
+            Support::Compiled {
+                prerequisite: "explicit_existing_private_root_native_filesystem_policy",
+            }
+        } else {
+            unavailable("namespace_mutation_durability_unsupported")
+        },
+        cooperative_runtime_ownership: unavailable("shared_authority_anchor_lease_not_integrated"),
         bounded_diagnostic_children: children,
         durable_action_writer_quiescence: unavailable("action_writer_quiescence_unimplemented"),
         process_window_desktop_serial_observations: windows_observations,
@@ -178,7 +188,7 @@ pub fn portable_inventory() -> CapabilityInventory {
     };
     let default_terminal = HostSupport {
         discovery: if cfg!(windows) {
-            unavailable("windows_observations_not_integrated")
+            unavailable("offline_cli_does_not_discover_hosts")
         } else {
             unavailable("reviewed_host_discovery_and_permissions_required")
         },
@@ -236,7 +246,9 @@ pub fn portable_inventory() -> CapabilityInventory {
         },
         devices,
         maintenance: MaintenanceSupport {
-            primary_usb_controller: unavailable("maintenance_capability_not_integrated"),
+            primary_usb_controller: unavailable(
+                "offline_transaction_model_only_no_native_update_backend",
+            ),
             other_device_families: unavailable("maintenance_unsupported_for_device_family"),
         },
         actions: unavailable("independent_authority_and_qualification_gates_required"),

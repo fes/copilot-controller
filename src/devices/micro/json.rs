@@ -354,6 +354,63 @@ pub(crate) fn append_json(output: &mut String, value: &Value) -> Result<(), ()> 
     render(output, value, false, true)
 }
 
+pub(crate) fn pretty_json(value: &Value, base_indent: usize) -> Result<String, ()> {
+    let mut compact = String::new();
+    append_json(&mut compact, value)?;
+    let mut output = String::new();
+    let mut chars = compact.chars().peekable();
+    let mut depth = base_indent;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut previous = '\0';
+    let newline = |output: &mut String, depth: usize| {
+        output.push('\n');
+        output.extend(std::iter::repeat_n(' ', depth * 2));
+    };
+    while let Some(character) = chars.next() {
+        if in_string {
+            output.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+        } else {
+            match character {
+                '"' => {
+                    in_string = true;
+                    output.push(character);
+                }
+                '[' | '{' => {
+                    output.push(character);
+                    depth += 1;
+                    let closing = if character == '[' { ']' } else { '}' };
+                    if chars.peek() != Some(&closing) {
+                        newline(&mut output, depth);
+                    }
+                }
+                ']' | '}' => {
+                    depth -= 1;
+                    if !matches!(previous, '[' | '{') {
+                        newline(&mut output, depth);
+                    }
+                    output.push(character);
+                }
+                ',' => {
+                    output.push(',');
+                    newline(&mut output, depth);
+                }
+                ':' => output.push_str(": "),
+                _ => output.push(character),
+            }
+        }
+        previous = character;
+    }
+    Ok(output)
+}
+
 pub(crate) fn append_json_plain(output: &mut String, value: &Value) -> Result<(), ()> {
     render(output, value, false, false)
 }

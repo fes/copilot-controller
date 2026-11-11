@@ -1,15 +1,16 @@
 use super::super::{
-    qualification::{bounded_sid_bytes, stable_security, TokenIds, TokenSnapshot},
     ErrorKind, PlatformError, PlatformResult, SecurityEvidence, TokenContext,
+    qualification::{TokenIds, TokenSnapshot, bounded_sid_bytes, stable_security},
 };
-use super::{last_error, native_error, process::HeldProcess, Handle};
+use super::{Handle, last_error, native_error, process::HeldProcess};
 use std::{ffi::c_void, mem, ptr};
 use windows_sys::Win32::{
-    Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE, LUID},
+    Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE, LUID},
     Security::{
-        GetTokenInformation, IsValidSid, TokenElevation, TokenIntegrityLevel, TokenIsAppContainer,
-        TokenSessionId, TokenStatistics, TokenUIAccess, TokenUser, TOKEN_ELEVATION,
-        TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER,
+        GetTokenInformation, IsValidSid, TOKEN_ELEVATION, TOKEN_INFORMATION_CLASS,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_STATISTICS, TOKEN_USER, TokenElevation,
+        TokenIntegrityLevel, TokenIsAppContainer, TokenSessionId, TokenStatistics, TokenUIAccess,
+        TokenUser,
     },
     System::{RemoteDesktop::ProcessIdToSessionId, Threading::OpenProcessToken},
 };

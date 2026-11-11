@@ -132,6 +132,15 @@ fail. It includes `schema: 1`, `read_only: true`, `command_ready: false`, and
 `qualification: "foundation_only"`. Probe success means the bounded experiment
 completed, not that physical input, visible output, or host control is qualified.
 
+The integration package currently routes offline inventories, synthetic previews,
+bounded recorded assignments, decoders, and pinned local firmware-plan validation.
+`doctor` samples the native clock and available read-only process/desktop
+observations; serial/device discovery is deliberately unavailable. Contained
+health workers are Windows-only. No hardware transports, native updater, shared
+authority-anchor lease, or transactional snapshot/recovery store is wired.
+Windows namespace mutations remain explicitly unavailable. Compiled codecs and
+test-only maintenance models are not runtime or physical acceptance.
+
 ## 4. Common types and time rules
 
 ### Identity

@@ -13,7 +13,7 @@ pub use process::{
 pub use qualification::{observe_console_membership, observe_exact_process, observe_ui_structure};
 pub use serial::observe_serial;
 
-use super::{windows_native_error, PlatformError};
+use super::{PlatformError, windows_native_error};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 
 struct Handle(HANDLE);

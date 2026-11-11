@@ -3,7 +3,7 @@ use super::{
     desktop::Desktop,
     image::observe_image_file,
     last_error,
-    process::{check_running, hold_process, inspect_held, Foreground, HeldProcess},
+    process::{Foreground, HeldProcess, check_running, hold_process, inspect_held},
     security::observe_security,
 };
 use uuid::Uuid;

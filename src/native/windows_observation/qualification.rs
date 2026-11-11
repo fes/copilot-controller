@@ -527,10 +527,10 @@ pub fn collect_ui_structure<B: UiBackend>(
         report.text_nodes += u32::from(metadata.control_type == 50_020);
         report.focused_nodes += u32::from(metadata.keyboard_focus);
         report.offscreen_nodes += u32::from(metadata.offscreen);
-        if depth > 0 {
-            if let Some(sibling) = backend.next_sibling(&node)? {
-                stack.push((sibling, depth));
-            }
+        if depth > 0
+            && let Some(sibling) = backend.next_sibling(&node)?
+        {
+            stack.push((sibling, depth));
         }
         if let Some(child) = backend.first_child(&node)? {
             stack.push((child, depth + 1));

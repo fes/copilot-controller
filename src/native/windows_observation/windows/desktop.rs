@@ -1,20 +1,20 @@
 use super::super::{
-    collect_desktop, observe_clock, process::object_name_matches, DesktopBackend, DesktopContext,
-    DesktopSnapshot, ErrorKind, MonotonicStamp, Observation, PlatformError, PlatformResult,
+    DesktopBackend, DesktopContext, DesktopSnapshot, ErrorKind, MonotonicStamp, Observation,
+    PlatformError, PlatformResult, collect_desktop, observe_clock, process::object_name_matches,
 };
 use super::{last_error, native_error};
 use std::{ffi::c_void, ptr};
 use uuid::Uuid;
 use windows_sys::Win32::{
-    Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE},
+    Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError, HANDLE},
     System::{
         RemoteDesktop::{
-            ProcessIdToSessionId, WTSClientProtocolType, WTSConnectState, WTSFreeMemory,
-            WTSGetActiveConsoleSessionId, WTSQuerySessionInformationW, WTS_INFO_CLASS,
+            ProcessIdToSessionId, WTS_INFO_CLASS, WTSClientProtocolType, WTSConnectState,
+            WTSFreeMemory, WTSGetActiveConsoleSessionId, WTSQuerySessionInformationW,
         },
         StationsAndDesktops::{
-            CloseDesktop, GetProcessWindowStation, GetThreadDesktop, GetUserObjectInformationW,
-            OpenInputDesktop, DESKTOP_READOBJECTS, HDESK, UOI_NAME,
+            CloseDesktop, DESKTOP_READOBJECTS, GetProcessWindowStation, GetThreadDesktop,
+            GetUserObjectInformationW, HDESK, OpenInputDesktop, UOI_NAME,
         },
         Threading::{GetCurrentProcessId, GetCurrentThreadId},
     },

@@ -57,6 +57,10 @@ New-Item -ItemType Directory -Path $target, $fixtures | Out-Null
 @(
     "CARGO_TARGET_DIR=$target"
     "COPILOT_CONTROLLER_TEST_ROOT=$fixtures"
+    "COPILOT_PRIVATE_ROOT_FIXTURES=$fixtures"
+    "COPILOT_FIRMWARE_FIXTURE_ROOT=$fixtures"
+    "PORTABLE_TEST_FIXTURES=$fixtures"
+    "SESSION_ENGINE_SAFE_FIXTURE_ROOT=$fixtures"
     "TMPDIR=$fixtures"
     "TMP=$fixtures"
     "TEMP=$fixtures"

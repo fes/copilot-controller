@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn controlled_same_executable_worker_suite() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_windows_worker_fixture"))
+    let helper = std::env::var_os("WINDOWS_WORKER_TEST_HELPER").expect("worker fixture path");
+    let mut child = Command::new(helper)
         .arg("suite")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

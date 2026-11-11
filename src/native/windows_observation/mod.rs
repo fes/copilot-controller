@@ -164,7 +164,7 @@ pub struct MonotonicStamp {
 }
 
 mod canonical_uuid {
-    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
     use uuid::Uuid;
 
     pub fn serialize<S: Serializer>(value: &Uuid, serializer: S) -> Result<S::Ok, S::Error> {

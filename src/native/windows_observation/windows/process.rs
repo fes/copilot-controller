@@ -1,25 +1,25 @@
 use super::super::{
-    collect_foreground, collect_process_inventory, observe_clock, ErrorKind, ExecutableNames,
-    ForegroundBackend, ForegroundEvidence, MonotonicStamp, Observation, PlatformError,
-    PlatformResult, ProcessEvidence, ProcessIdentity, ProcessInventory, ProcessInventoryBackend,
+    ErrorKind, ExecutableNames, ForegroundBackend, ForegroundEvidence, MonotonicStamp, Observation,
+    PlatformError, PlatformResult, ProcessEvidence, ProcessIdentity, ProcessInventory,
+    ProcessInventoryBackend, collect_foreground, collect_process_inventory, observe_clock,
 };
-use super::{last_error, native_error, Handle};
+use super::{Handle, last_error, native_error};
 use std::mem;
 use uuid::Uuid;
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES,
-        FILETIME, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, FILETIME,
+        GetLastError, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     System::{
         Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
             TH32CS_SNAPPROCESS,
         },
         RemoteDesktop::ProcessIdToSessionId,
         Threading::{
-            GetCurrentProcessId, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
-            WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            GetCurrentProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
         },
     },
     UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
