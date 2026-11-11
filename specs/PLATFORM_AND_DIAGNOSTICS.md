@@ -863,8 +863,14 @@ retained process group with `_exit(1)` fallback. It does not need HID locks,
 Rust destructors or cooperation from a blocked main thread. It also enforces
 a 120-second maximum before full request receipt, narrowed to the validated
 device-spec budget measured from watchdog startup. On ordinary completion,
-it is stopped/unparked and joined within 250 ms; uncertainty terminates the
-child instead of publishing success.
+it is stopped/unparked and joined using the remaining original child budget,
+not a separate short shutdown grace. While waiting, the main thread continues
+checking the retained parent lifetime and child deadline; either failure, a
+watchdog panic or missing startup acknowledgement terminates the group. The
+supervisor still enforces any shorter caller deadline, including shutdown,
+EOF and exit. A delayed watchdog alone does not change a successful response
+into worker failure while those deadlines remain satisfied; success still
+requires zero exit and confirmed process/I/O cleanup.
 
 Only after full request validation and watchdog startup can the child establish
 a private thread-bound, per-request HID capability. Native access additionally

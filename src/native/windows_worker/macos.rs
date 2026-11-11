@@ -35,7 +35,6 @@ use super::{
 const POLL: Duration = Duration::from_millis(5);
 const WATCHDOG_POLL: Duration = Duration::from_millis(50);
 const WATCHDOG_START: Duration = Duration::from_secs(1);
-const WATCHDOG_STOP: Duration = Duration::from_millis(250);
 static SUPERVISOR: SupervisorGate = SupervisorGate::new();
 
 thread_local! {
@@ -259,6 +258,7 @@ struct ParentWatchdog {
     limit_ms: Arc<AtomicU64>,
     task: Option<thread::JoinHandle<()>>,
     started: Instant,
+    parent: WorkerIdentity,
 }
 
 impl ParentWatchdog {
@@ -305,10 +305,11 @@ impl ParentWatchdog {
             limit_ms,
             task: Some(task),
             started,
+            parent,
         };
-        receiver
-            .recv_timeout(WATCHDOG_START)
-            .map_err(|_| Kind::Containment)?;
+        if receiver.recv_timeout(WATCHDOG_START).is_err() {
+            terminate_worker_group(pid);
+        }
         WATCHDOG_PARENT.with(|slot| slot.set(Some(parent)));
         Ok(watchdog)
     }
@@ -334,11 +335,19 @@ impl Drop for ParentWatchdog {
             return;
         };
         task.thread().unpark();
-        let until = Instant::now() + WATCHDOG_STOP;
-        while !task.is_finished() && Instant::now() < until {
+        // Shutdown consumes the existing child budget, not a separate short
+        // grace that could kill a successfully completed probe under load.
+        // The supervisor still enforces any shorter caller deadline.
+        while !task.is_finished() {
+            if !parent_alive(self.parent)
+                || self.started.elapsed().as_millis()
+                    >= u128::from(self.limit_ms.load(Ordering::Acquire))
+            {
+                terminate_worker_group(unsafe { libc::getpid() });
+            }
             thread::sleep(POLL);
         }
-        if !task.is_finished() || task.join().is_err() {
+        if task.join().is_err() {
             terminate_worker_group(unsafe { libc::getpid() });
         }
     }

@@ -264,3 +264,108 @@ fn watchdog_bounds_a_blocked_main_thread_with_a_live_parent() {
     let status = child.finish().unwrap();
     assert!(status.signal() == Some(libc::SIGKILL) || status.code() == Some(1));
 }
+
+#[test]
+fn delayed_watchdog_shutdown_allows_normal_exit_but_keeps_child_deadline() {
+    const TEST: &str =
+        "reliability::delayed_watchdog_shutdown_allows_normal_exit_but_keeps_child_deadline";
+    if std::env::var("MACOS_WORKER_ISOLATED").as_deref() == Ok(TEST) {
+        verify_containment().unwrap();
+        let blocked = std::env::var("MACOS_WATCHDOG_SHUTDOWN_BLOCKED").unwrap() == "true";
+        let parent = process_lifetime(&process_info(unsafe { libc::getppid() }).unwrap()).unwrap();
+        let worker = identity(unsafe { libc::getpid() }).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&stop);
+        let started = Instant::now();
+        let task = thread::spawn(move || {
+            while !signal.load(Ordering::Acquire) {
+                thread::park_timeout(POLL);
+            }
+            if blocked {
+                loop {
+                    thread::park();
+                }
+            }
+            // Deterministically defer completion beyond the former 250 ms
+            // shutdown grace, without requiring scheduler contention.
+            thread::sleep(Duration::from_millis(500));
+        });
+        let watchdog = ParentWatchdog {
+            stop,
+            limit_ms: Arc::new(AtomicU64::new(if blocked { 300 } else { 3000 })),
+            task: Some(task),
+            started,
+            parent,
+        };
+        let frame = protocol::encode_response(
+            &protocol::Outcome::Ok { payload: json!({}) },
+            Uuid::new_v4(),
+            worker,
+        )
+        .unwrap();
+        duplicate_pipe(libc::STDOUT_FILENO)
+            .unwrap()
+            .write_all(&frame)
+            .unwrap();
+        fs::write(
+            std::env::var_os("MACOS_WATCHDOG_RESPONSE_RECORD").unwrap(),
+            serde_json::to_vec(&json!({
+                "pid": worker.pid, "pgid": worker.pid,
+                "creation_time_100ns": worker.creation_time_100ns,
+                "response_written": true,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let shutdown_started = Instant::now();
+        drop(watchdog);
+        assert!(
+            !blocked,
+            "blocked shutdown must not escape its child budget"
+        );
+        assert!(shutdown_started.elapsed() >= Duration::from_millis(500));
+        return;
+    }
+    let name = format!(
+        "{}::delayed_watchdog_shutdown_allows_normal_exit_but_keeps_child_deadline",
+        module_path!().split_once("::").unwrap().1
+    );
+    for blocked in [false, true] {
+        let fixture = Fixture::new();
+        let record_path = fixture.path("response.json");
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", &name, "--nocapture"])
+            .env("MACOS_WORKER_ISOLATED", TEST)
+            .env("MACOS_WATCHDOG_SHUTDOWN_BLOCKED", blocked.to_string())
+            .env("MACOS_WATCHDOG_RESPONSE_RECORD", &record_path)
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command.spawn().unwrap();
+        let pid = child.id() as i32;
+        let mut child = GroupGuard::new(child, pid);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let record = wait_for_record(&record_path, deadline);
+        assert_eq!(record["response_written"], true);
+        assert_eq!(record["pid"], pid);
+        while !peek_exited(pid, deadline).unwrap() && Instant::now() < deadline {
+            thread::sleep(POLL);
+        }
+        assert!(
+            peek_exited(pid, deadline).unwrap(),
+            "shutdown did not complete within its existing budget"
+        );
+        let status = child.finish().unwrap();
+        if blocked {
+            assert!(status.signal() == Some(libc::SIGKILL) || status.code() == Some(1));
+        } else {
+            assert!(
+                status.success(),
+                "delayed watchdog changed a successful exit"
+            );
+        }
+        assert_reaped(record_identity(&record));
+    }
+}

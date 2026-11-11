@@ -105,8 +105,13 @@ cleanup stickily forbids replacement. An independent child watchdog checks the
 parent's native PID/start time every 50 ms, kills the worker group on parent
 death/mismatch/unavailable observation, and can terminate a blocked main thread
 without destructors or HID locks. Startup is acknowledged within one second;
-ordinary stop/join has a 250 ms budget and fails closed. It also caps child
-lifetime at 120 seconds before request validation, then the device-spec budget.
+ordinary stop/unpark/join consumes the remaining original child budget rather
+than a separate short grace. During that wait the main thread checks parent
+lifetime and the child deadline; failure or a watchdog panic kills the group.
+The supervisor's shorter caller deadline still covers shutdown, EOF and exit,
+so a delayed watchdog cannot independently turn completion into worker failure
+before those bounds expire. Child lifetime is capped at 120 seconds before
+request validation, then the device-spec budget.
 This is user-space polling, not a kernel parent-death or escape guarantee;
 suspended processes, scheduler/driver stalls and escaped descendants remain
 outside that guarantee. Watchdog termination cannot grant durable replacement
