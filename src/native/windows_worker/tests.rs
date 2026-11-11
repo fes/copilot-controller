@@ -132,6 +132,39 @@ fn duplicate_keys_are_rejected_before_callback_payload_becomes_value() {
 }
 
 #[test]
+fn health_registry_rejects_ct_while_explicit_worker_registry_accepts_it() {
+    let health = crate::cli::health_allowlist().unwrap();
+    let combined = crate::cli::diagnostic_allowlist().unwrap();
+    let envelope = RequestEnvelope {
+        version: VERSION,
+        request_nonce: nonce(),
+        request: DiagnosticRequest {
+            kind: "ct_serial_probe".into(),
+            payload: serde_json::to_value(crate::devices::ct::probe::Options::default()).unwrap(),
+        },
+    };
+    assert!(health.find("health").is_some());
+    assert!(health.find("ct_serial_probe").is_none());
+    assert_eq!(
+        protocol::validate_request(&envelope, &health),
+        Err(WorkerErrorKind::InvalidRequest),
+    );
+    // Admission rejects CT before platform dispatch, including on Windows.
+    let error = probe(
+        &envelope.request,
+        Duration::from_secs(3),
+        &AtomicBool::new(false),
+        &health,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind, WorkerErrorKind::InvalidRequest);
+    assert_eq!(error.worker, None);
+    assert!(combined.find("health").is_some());
+    assert!(combined.find("ct_serial_probe").is_some());
+    protocol::validate_request(&envelope, &combined).unwrap();
+}
+
+#[test]
 fn production_ct_callback_is_allowlisted_and_invalid_payload_is_not_success_shaped() {
     let registry = crate::cli::diagnostic_allowlist().unwrap();
     let callback = registry

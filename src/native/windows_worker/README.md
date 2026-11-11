@@ -58,7 +58,9 @@ discarded with a 16,384-byte limit. Duplicate JSON object keys (including inside
 generic payloads) fail as `protocol` before callback dispatch.
 
 The controller executable's static registry contains `health` and
-`ct_serial_probe`. Only explicit `ct-probe` launches the latter; its typed §6
+`ct_serial_probe`. This explicitly combined `diagnostic_allowlist()` is distinct
+from the original health-only `health_allowlist()`, which rejects CT requests.
+Only explicit `ct-probe` launches the latter kind; its typed §6
 options cannot choose a port, path, command or selector. The worker callback
 owns the native CT transport and returns only validated report/failure data.
 The coordinator treats a transported CT failure as a nonzero CLI error even

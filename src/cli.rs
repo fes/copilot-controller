@@ -547,19 +547,22 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
     }
 }
 
+static HEALTH_CALLBACKS: [worker::DiagnosticCallback; 1] =
+    [worker::DiagnosticCallback::new("health", health_callback)];
+
 static DIAGNOSTIC_CALLBACKS: [worker::DiagnosticCallback; 2] = [
     worker::DiagnosticCallback::new("health", health_callback),
     worker::DiagnosticCallback::new(ct_probe::KIND, ct_probe::callback),
 ];
 
-/// Shared static registry for the coordinator and hidden worker.
+/// Explicit CT-enabled registry for the diagnostic coordinator and hidden worker.
 pub fn diagnostic_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
     worker::DiagnosticAllowlist::new(&DIAGNOSTIC_CALLBACKS).map_err(|error| error.to_string())
 }
 
-/// Retained for callers of the original health route.
+/// Health-only authority; this registry cannot authorize a device probe.
 pub fn health_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
-    diagnostic_allowlist()
+    worker::DiagnosticAllowlist::new(&HEALTH_CALLBACKS).map_err(|error| error.to_string())
 }
 
 fn health_callback(payload: Value) -> Result<Value, worker::DiagnosticCallbackError> {
