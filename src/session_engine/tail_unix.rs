@@ -229,11 +229,81 @@ fn reject_extended_acl(file: &File) -> Result<(), TailError> {
     }
     let mut entry = std::ptr::null_mut();
     let result = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
+    let error = std::io::Error::last_os_error().raw_os_error();
     let freed = unsafe { acl_free(acl) };
-    if result == 0 && freed == 0 {
+    if acl_entry_is_absent(result, error) && freed == 0 {
         Ok(())
     } else {
         Err(TailError::UnsafePath)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn acl_entry_is_absent(result: c_int, error: Option<c_int>) -> bool {
+    // Darwin returns -1/EINVAL for ACL_FIRST_ENTRY on an empty valid ACL.
+    result == -1 && error == Some(libc::EINVAL)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod acl_tests {
+    use super::*;
+    use std::{fs::OpenOptions, process::Command};
+
+    struct Fixture(PathBuf);
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn file_with_extended_acl_is_rejected() {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join(format!("acl-test-{}", std::process::id()));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let fixture = Fixture(path);
+        assert_eq!(reject_extended_acl(&file), Ok(()));
+        let user = Command::new("/usr/bin/id").arg("-un").output().unwrap();
+        assert!(user.status.success());
+        let user = std::str::from_utf8(&user.stdout).unwrap().trim();
+        assert!(
+            Command::new("/bin/chmod")
+                .arg("+a")
+                .arg(format!("user:{user} allow read"))
+                .arg(&fixture.0)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(reject_extended_acl(&file), Err(TailError::UnsafePath));
+    }
+
+    #[test]
+    fn empty_acl_is_allowed_but_entries_and_other_errors_are_not() {
+        unsafe extern "C" {
+            fn acl_init(count: c_int) -> *mut c_void;
+            fn acl_create_entry(acl: *mut *mut c_void, entry: *mut *mut c_void) -> c_int;
+            fn acl_get_entry(acl: *mut c_void, entry_id: c_int, entry: *mut *mut c_void) -> c_int;
+            fn acl_free(object: *mut c_void) -> c_int;
+        }
+        let mut acl = unsafe { acl_init(1) };
+        assert!(!acl.is_null());
+        let mut entry = std::ptr::null_mut();
+        let result = unsafe { acl_get_entry(acl, 0, &mut entry) };
+        let error = std::io::Error::last_os_error().raw_os_error();
+        assert!(acl_entry_is_absent(result, error));
+        assert_eq!(unsafe { acl_create_entry(&mut acl, &mut entry) }, 0);
+        let result = unsafe { acl_get_entry(acl, 0, &mut entry) };
+        assert!(!acl_entry_is_absent(result, None));
+        assert!(!acl_entry_is_absent(-1, Some(libc::EIO)));
+        assert_eq!(unsafe { acl_free(acl) }, 0);
     }
 }
 

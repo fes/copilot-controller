@@ -15,7 +15,6 @@ use super::{
 
 pub const MAX_POLL_BYTES: usize = 4_194_304;
 pub const MAX_FORKS_PER_POLL: usize = 64;
-const MIN_FORK_LINE_BYTES: usize = 37;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileIdentity {
@@ -132,6 +131,7 @@ impl TailCursor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TailReport {
     pub records: usize,
+    /// Physical bytes read, including any read-ahead revisited by the next poll.
     pub bytes_read: usize,
     pub caught_up: bool,
     pub reset: bool,
@@ -207,17 +207,7 @@ fn poll_inner<B: TailBoundary>(
     let mut buffer = [0_u8; 8192];
     let mut saw_eof = false;
     while report.bytes_read < budget {
-        let remaining_forks = MAX_FORKS_PER_POLL - report.fork_observations.len();
-        // A complete later fork line needs at least its 36-byte UUID and newline.
-        // With only one observation left, stop exactly at its terminating byte.
-        let cap_limit = if remaining_forks == 1 {
-            1
-        } else {
-            (remaining_forks - 1) * MIN_FORK_LINE_BYTES
-        };
-        let limit = (budget - report.bytes_read)
-            .min(buffer.len())
-            .min(cap_limit);
+        let limit = (budget - report.bytes_read).min(buffer.len());
         let count = file.read(&mut buffer[..limit]).map_err(|_| TailError::Io)?;
         if count > limit {
             return Err(TailError::Io);
@@ -303,7 +293,7 @@ fn process_bytes(
         }
         cursor.partial.clear();
         if report.fork_observations.len() == MAX_FORKS_PER_POLL {
-            // Stop before any later record rather than lose fork evidence.
+            // Unprocessed read-ahead is revisited from the cursor offset next poll.
             return Ok(true);
         }
     }

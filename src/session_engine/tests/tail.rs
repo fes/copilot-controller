@@ -38,6 +38,7 @@ struct FakeState {
     modified: i128,
     changed: i128,
     mutation: Option<Mutation>,
+    reads: usize,
 }
 
 impl FakeState {
@@ -68,6 +69,7 @@ impl FakeBoundary {
             modified: 1,
             changed: 1,
             mutation: None,
+            reads: 0,
         })))
     }
 }
@@ -120,6 +122,7 @@ impl Seek for FakeFile {
 impl Read for FakeFile {
     fn read(&mut self, target: &mut [u8]) -> io::Result<usize> {
         let mut state = self.state.borrow_mut();
+        state.reads += 1;
         if matches!(state.mutation, Some(Mutation::ReadError)) {
             return Err(io::Error::other("private read path"));
         }
@@ -566,7 +569,7 @@ fn e03_fork_observation_cap_never_skips_later_history() {
     let first = poll(&boundary, path(), MAX_POLL_BYTES, &mut cursor, &mut reducer).unwrap();
     assert_eq!(first.fork_observations.len(), MAX_FORKS_PER_POLL);
     assert_eq!(first.records, MAX_FORKS_PER_POLL);
-    assert_eq!(cursor.offset(), first.bytes_read as u64);
+    assert!(cursor.offset() <= first.bytes_read as u64);
     assert!(!first.caught_up);
     assert_eq!(reducer.status(), Status::Idle);
     let second = poll(&boundary, path(), MAX_POLL_BYTES, &mut cursor, &mut reducer).unwrap();
@@ -579,6 +582,40 @@ fn e03_fork_observation_cap_never_skips_later_history() {
     );
     assert_eq!(reducer.status(), Status::Complete);
     assert!(!format!("{first:?}{second:?}").contains("hidden"));
+}
+
+#[test]
+fn e03_ordinary_input_after_fork_threshold_is_read_in_chunks() {
+    let mut data = Vec::new();
+    for id in 1..=MAX_FORKS_PER_POLL + 1 {
+        if id == MAX_FORKS_PER_POLL {
+            data.extend(std::iter::repeat_n(b'\n', 30_000));
+        }
+        let message = format!(
+            "Forked this session into \"hidden\" ({}).",
+            session(id as u128 + 100)
+        );
+        let record = serde_json::json!({
+            "type":"session.info", "timestamp":id, "data":{"infoType":"fork", "message":message}
+        });
+        data.extend(serde_json::to_vec(&record).unwrap());
+        data.push(b'\n');
+    }
+    data.extend(bytes(r#"{"type":"session.task_complete","timestamp":100}"#));
+    let boundary = FakeBoundary::new(data.clone());
+    let mut cursor = TailCursor::default();
+    let mut reducer = Reducer::new();
+    let first = poll(&boundary, path(), MAX_POLL_BYTES, &mut cursor, &mut reducer).unwrap();
+    assert_eq!(first.fork_observations.len(), MAX_FORKS_PER_POLL);
+    assert!(boundary.0.borrow().reads < 20);
+    assert!(cursor.offset() < first.bytes_read as u64);
+    assert!(!first.caught_up);
+    let second = poll(&boundary, path(), MAX_POLL_BYTES, &mut cursor, &mut reducer).unwrap();
+    assert_eq!(second.fork_observations.len(), 1);
+    assert_eq!(second.records, 2);
+    assert_eq!(cursor.offset(), data.len() as u64);
+    assert!(second.caught_up);
+    assert_eq!(reducer.status(), Status::Complete);
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
