@@ -728,9 +728,14 @@ the coordinator reports `frame_limit` rather than unexplained EOF.
 `--health-check` bypasses backend construction and all device I/O in the child.
 On platforms without the Windows/macOS ARM64 supervisor it returns only the pure health
 report in-process; this is not a live-I/O fallback. Native probing requires
-`micro-hid`. Windows cannot currently provide the required native interface,
-bus and raw report-descriptor evidence, so live probes fail closed before
-reports. macOS ARM64 now uses the same-executable bounded process-group worker;
+`micro-hid`. Windows reads optional exact collection BusTypeGuid metadata,
+classifying only the documented USB bus GUID. Native interface numbers and
+original report descriptors remain unavailable, so live probes fail closed
+before transport open/reports. The report-descriptor IOCTL is HID minidriver
+traffic, not a supported user-mode collection request; no parsed-data or path
+substitute is accepted. All Windows HID access requires a private scoped
+contained-child capability and post-open identity/bus revalidation; see
+platform appendix §2.5. macOS ARM64 now uses the same-executable bounded process-group worker;
 all IOKit access and writes require its private scoped capability and a
 same-executable parent. No ordinary in-process native access or live fallback
 exists. Exact native property/descriptor evidence remains required and unverified

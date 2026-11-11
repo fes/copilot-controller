@@ -719,6 +719,36 @@ fn duplicate_pipe(which: STD_HANDLE) -> Result<File, Kind> {
     Ok(File::from(duplicate))
 }
 
+#[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
+pub(super) fn verify_hid_containment() -> bool {
+    use windows_sys::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
+
+    let mut in_job = 0;
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    let mut process_ids = [0; 1];
+    // SAFETY: fixed-size out-structures; null Job selects the current process's
+    // Job. These queries do not touch devices.
+    let valid = unsafe {
+        IsProcessInJob(GetCurrentProcess(), null_mut(), &mut in_job) != 0
+            && QueryInformationJobObject(
+                null_mut(),
+                JobObjectExtendedLimitInformation,
+                (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of_val(&limits) as u32,
+                null_mut(),
+            ) != 0
+            && GetConsoleWindow().is_null()
+            && GetConsoleProcessList(process_ids.as_mut_ptr(), 1) == 0
+    };
+    let flags = limits.BasicLimitInformation.LimitFlags;
+    let required = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+    valid
+        && in_job != 0
+        && limits.BasicLimitInformation.ActiveProcessLimit == 1
+        && flags & required == required
+        && flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) == 0
+}
+
 pub(super) fn worker_main(allowlist: &DiagnosticAllowlist) -> Result<(), WorkerError> {
     let run = || -> Result<(), Kind> {
         let mut stdin = duplicate_pipe(STD_INPUT_HANDLE)?;
@@ -731,6 +761,22 @@ pub(super) fn worker_main(allowlist: &DiagnosticAllowlist) -> Result<(), WorkerE
         let callback = allowlist
             .find(&envelope.request.kind)
             .ok_or(Kind::InvalidRequest)?;
+        #[cfg(any(feature = "micro-hid", feature = "akp03-hid"))]
+        let _hid_scope = match envelope.request.kind.as_str() {
+            "micro_hid_probe" | "akp03_hid_probe" => {
+                crate::cli::validate_worker_options(
+                    envelope.request.payload.clone(),
+                    envelope.request.kind == "micro_hid_probe",
+                )
+                .map_err(|_| Kind::InvalidRequest)?;
+                Some(super::hid_scope::HidWorkerScope::enter(
+                    envelope.request.payload["health_check"] == false,
+                    new_nonce()?,
+                    verify_hid_containment,
+                )?)
+            }
+            _ => None,
+        };
         let outcome = protocol::invoke_callback(callback, envelope.request.payload);
         let frame = protocol::encode_response(&outcome, envelope.request_nonce, worker)?;
         stdout.write_all(&frame).map_err(|_| Kind::Transport)?;

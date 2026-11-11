@@ -367,7 +367,10 @@ fn decode_options(payload: Value, micro: bool) -> Result<Options, worker::Diagno
     Ok(options)
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(windows, any(feature = "micro-hid", feature = "akp03-hid"))
+))]
 pub(crate) fn validate_worker_options(
     payload: Value,
     micro: bool,

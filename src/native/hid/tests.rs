@@ -162,14 +162,28 @@ fn original_report_descriptor_is_bounded_and_fail_closed_when_missing() {
         ))
     );
 
-    b.state.borrow_mut().report_descriptor = Some(vec![0x06; 54]);
-    let mut device = HidDevice::open(&b, &d).unwrap();
-    assert_eq!(device.report_descriptor().unwrap(), vec![0x06; 54]);
-    b.state.borrow_mut().report_descriptor = Some(vec![0x06; MAX_REPORT_DESCRIPTOR_LEN + 1]);
-    let mut device = HidDevice::open(&b, &d).unwrap();
+    for bytes in [
+        vec![0x06, 0x00, 0xff, 0x09, 0x01, 0xa1, 0x01, 0xc0],
+        (0..MAX_REPORT_DESCRIPTOR_LEN).map(|n| n as u8).collect(),
+    ] {
+        b.state.borrow_mut().report_descriptor = Some(bytes.clone());
+        assert_eq!(device.report_descriptor().unwrap(), bytes);
+    }
+    for bytes in [Vec::new(), vec![0x06; MAX_REPORT_DESCRIPTOR_LEN + 1]] {
+        b.state.borrow_mut().report_descriptor = Some(bytes);
+        assert!(matches!(
+            device.report_descriptor(),
+            Err(HidError::Protocol(_))
+        ));
+    }
+}
+
+#[cfg(all(windows, any(feature = "micro-hid", feature = "akp03-hid")))]
+#[test]
+fn windows_native_backend_denies_unscoped_access_without_io() {
     assert!(matches!(
-        device.report_descriptor(),
-        Err(HidError::Protocol(_))
+        native_backend(),
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedAccess))
     ));
 }
 

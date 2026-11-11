@@ -8,17 +8,19 @@
 //! Platform HID calls are synchronous. Report reads accept a timeout that the
 //! native backends attempt to honor (overlapped I/O on Windows, run-loop timeout
 //! on macOS), but the behavior has not been validated against hardware. Windows
-//! writes use a fixed best-effort deadline. All macOS IOKit access requires a
-//! private capability issued only inside the verified supervised worker.
+//! writes use a fixed best-effort deadline. Windows HID and macOS IOKit access
+//! require a private capability issued only inside the verified supervised worker.
 //! `IOHIDDeviceSetReport` can block indefinitely; the parent deadline and child
 //! watchdog bound the worker lifetime on a responsive OS, not an individual
 //! write timeout. Callers must run any live use inside a
 //! disposable, supervised worker process that can be killed; this module does not
 //! provide a bounded live probe.
 //!
-//! The Windows backend currently cannot supply a native interface number or the
-//! original HID report descriptor. The macOS backend reads those only from native
-//! properties when available. Consumers requiring either artifact fail closed
+//! Windows reads bus evidence from the collection's native BusTypeGuid property,
+//! but cannot supply a documented native interface number or original report
+//! descriptor (the report-descriptor IOCTL is for HID minidrivers, not applications).
+//! The macOS backend reads those only from native properties when available.
+//! Consumers requiring either artifact fail closed
 //! with [`HidError::EvidenceUnavailable`] rather than infer it from parsed caps or
 //! a device path.
 //!
@@ -49,6 +51,15 @@ pub(crate) use iokit::fixture_output;
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 mod win32;
+#[cfg(any(
+    test,
+    all(
+        any(feature = "akp03-hid", feature = "micro-hid"),
+        windows,
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+mod win32_evidence;
 
 #[cfg(test)]
 pub(crate) mod fake;
@@ -382,7 +393,7 @@ pub fn enumerate(
 
 /// Explicit opt-in constructor for the platform backend. Fails closed with a
 /// typed `Unavailable` when the feature, OS, or architecture is unsupported
-/// (always on Linux). On macOS, also requires the private supervised-child
+/// (always on Linux). On Windows/macOS, also requires the private supervised-child
 /// capability; ordinary in-process API calls fail closed. Construction touches
 /// no device.
 pub fn native_backend() -> Result<Box<dyn HidBackend>, HidError> {
@@ -402,7 +413,7 @@ pub fn native_backend() -> Result<Box<dyn HidBackend>, HidError> {
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 fn native_backend_impl() -> Result<Box<dyn HidBackend>, HidError> {
-    Ok(Box::new(win32::WindowsHid))
+    Ok(Box::new(win32::WindowsHid::new()?))
 }
 
 #[cfg(all(

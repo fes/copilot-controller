@@ -139,6 +139,52 @@ Maintenance for the primary USB controller imports the maintenance subsystem's c
 
 Aggregate action support remains unavailable until provider, host, durability, lifecycle, device timing, and writer-quiescence gates pass.
 
+### 2.5 Windows HID evidence and residual scope
+
+With `micro-hid` or `akp03-hid`, Windows x64/ARM64 can collect optional
+metadata only inside a validated, explicitly opted-in HID worker callback.
+A private thread-bound, per-request capability checks the detached,
+one-process, no-breakaway, kill-on-close Job before backend construction and
+native operations. Health and ordinary in-process callers receive no capability;
+expiry or failed containment revalidation denies further access. OS/driver
+stalls are bounded only by the existing disposable worker supervision, not
+by an in-process fallback or a guaranteed per-call timeout.
+
+| Artifact | Native source and exact acceptance | Remaining limitation |
+|---|---|---|
+| Bus | `SetupDiGetDeviceInterfaceDetailW` supplies the collection's `SP_DEVINFO_DATA`; `SetupDiGetDevicePropertyW(DEVPKEY_Device_BusTypeGuid)` must succeed with exactly `DEVPROP_TYPE_GUID` and 16 bytes. Only `GUID_BUS_TYPE_USB` (`9d7debbc-c85d-11d1-9eb4-006008c3a19a`, Wdmguid.h) maps to USB. Other valid GUIDs map to `Unknown`; missing/error/wrong type/size maps to unavailable. | No parent traversal or string/path/usage inference. A HID bus or Bluetooth setup-class/interface GUID does not prove the physical transport. Bluetooth classification is not implemented without a documented bus-GUID contract. |
+| Interface number | Unavailable (`None`). | No documented exact `bInterfaceNumber` source was confirmed for this user-mode collection path. Do not parse `mi_` or inspect `HIDP_CAPS` reserved fields. |
+| Original report descriptor | `EvidenceUnavailable(RawReportDescriptor)`, without issuing a descriptor IOCTL. | Microsoft lists `IOCTL_HID_GET_REPORT_DESCRIPTOR` under **HID Minidriver IOCTLs**, sent only by HIDClass to minidrivers, not by user-mode applications to collection handles. `IRP_MJ_DEVICE_CONTROL` on the individual IOCTL page does not change this contract. Collection-descriptor/preparsed-data APIs return parsed data, not the original bytes; reconstruction is prohibited. |
+
+Bus reads use a fixed 16-byte buffer, never an allocation or retry based on an
+untrusted required size. SetupAPI scans at most 4096 interfaces, caps each
+detail buffer at 4096 bytes and validates a terminated UTF-16 path within the
+returned extent and the 512-byte metadata limit. At most 64 enumerated
+candidates retain evidence. Opening requires the same backend's retained
+descriptor, then re-reads attributes/caps/strings on the opened handle and
+re-resolves that exact collection path through SetupAPI for the same bus
+property. Any identity, report-size, optional metadata or raw GUID mismatch
+fails closed, even when both GUIDs would classify as `Unknown`. Composite
+reopen may change only primary usage; all other checks remain.
+These are post-open observations, not an atomic PnP/physical identity guarantee.
+
+Micro/AKP03 still fail closed at the missing interface gate before transport
+open/report I/O. Optional metadata does not promise successful Windows live
+probing or physical qualification. Fake API-seam tests cover property
+type/size/value failures, exact GUID revalidation and scoped authority.
+Exact/empty/oversized descriptor tests exercise the shared injectable transport
+boundary (1..=1024 bytes); they do not demonstrate Windows raw-descriptor
+retrieval. No hardware or Windows runtime acceptance is claimed.
+
+Official contracts:
+[HID APIs](https://learn.microsoft.com/en-us/windows-hardware/drivers/hid/hid-api),
+[HID Minidriver vs Class Driver IOCTLs](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/_hid/),
+[report-descriptor IOCTL](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/hidport/ni-hidport-ioctl_hid_get_report_descriptor),
+[BusTypeGuid](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/devpkey-device-bustypeguid),
+[bus GUID definition contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/irp-mn-query-bus-information),
+[SetupDiGetDevicePropertyW](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupdigetdevicepropertyw),
+[SetupDiGetDeviceInterfaceDetailW](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupdigetdeviceinterfacedetailw).
+
 ## 3. Shared observation and error contracts
 
 ### 3.1 Errors and privacy

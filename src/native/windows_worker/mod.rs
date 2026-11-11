@@ -18,6 +18,8 @@ use serde_json::Value;
 #[cfg(not(windows))]
 use uuid::Uuid;
 
+#[cfg(any(test, all(windows, any(feature = "micro-hid", feature = "akp03-hid"))))]
+mod hid_scope;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod macos;
 mod protocol;
@@ -25,6 +27,8 @@ mod protocol;
 mod supervision;
 #[cfg(windows)]
 mod windows;
+#[cfg(all(windows, any(feature = "micro-hid", feature = "akp03-hid")))]
+pub(crate) use hid_scope::{HidWorkerCapability, hid_worker_capability};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) use macos::worker_health;
 #[cfg(all(

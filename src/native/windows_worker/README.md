@@ -90,6 +90,18 @@ process. These budgets cannot physically bound a stuck OS or driver. The
 fence is neither durable nor cross-process, and the Job is not a
 credential-restricted hostile-code sandbox.
 
+Windows HID backend construction and native operations additionally require a
+private thread-bound, per-request capability. The worker issues it only after
+complete typed Micro/AKP03 option validation for a live (not health) callback
+and detached one-process/no-breakaway/kill-on-close Job validation. Health,
+other callback kinds, ordinary in-process callers and expired scopes cannot
+access HID. Optional exact collection BusTypeGuid metadata is available;
+interface numbers and original report descriptors remain unavailable, so
+Micro/AKP03 still fail closed before transport open/report I/O. In particular,
+`IOCTL_HID_GET_REPORT_DESCRIPTOR` is a minidriver request, not a supported
+user-mode collection API. See `specs/PLATFORM_AND_DIAGNOSTICS.md` §2.5 for
+native sources, bounds, revalidation and official references.
+
 ## Tests
 
 ### macOS ARM64

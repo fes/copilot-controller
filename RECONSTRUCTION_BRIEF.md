@@ -80,7 +80,7 @@ Commit the toolchain selection and lockfile, and support:
 |---|---|---|---|
 | Pure engine, encoders, decoders, JSON/SVG previews | Yes | Yes | Yes |
 | Native observations | Platform-specific, with explicit limitations | Platform-specific, with explicit limitations | Platform-specific, with explicit limitations |
-| Micro and AKP03 HID metadata/probes | Optional feature | Optional feature | Unavailable, even when feature selected |
+| Micro and AKP03 HID metadata/probes | Optional worker-only metadata; live probes fail closed on missing exact evidence | Optional feature | Unavailable, even when feature selected |
 | CT serial probe | Native implementation | Unavailable | Unavailable |
 | Micro firmware update | Unavailable | Optional feature, ARM64 only | Unavailable |
 | Safe persistent state and cooperative owner | Fixed local disk | Local APFS | Local ext-family, XFS, Btrfs |
@@ -141,8 +141,13 @@ health workers run on Windows/macOS ARM64. Explicit `ct-probe`, `micro-probe`, a
 supervisor, with static kind-only HID authority and validated options/results.
 Micro/AKP03 `--health-check` uses pure no-I/O reports on other platforms and
 requires no HID feature. Live HID probing requires the device-specific feature
-and native descriptor evidence; Windows HID currently lacks that evidence and
-fails closed. Micro/AKP03 also use the macOS ARM64 bounded process-group worker,
+and native descriptor evidence. Windows exposes optional collection BusTypeGuid
+metadata (only a documented USB bus GUID is classified), but exact interface
+numbers and original report descriptors remain unavailable, so live probes
+fail closed. Windows HID access requires a private, scoped contained-child
+capability; there is no in-process fallback. See platform appendix §2.5 for
+the supported API contract and residual evidence gaps.
+Micro/AKP03 also use the macOS ARM64 bounded process-group worker,
 with the exact hidden routes, framing and device-spec budgets. All IOKit access
 and writes require a private, scoped child capability and same-executable parent;
 ordinary public in-process native access fails closed. Health constructs no HID
