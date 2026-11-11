@@ -690,6 +690,13 @@ impl<T: Transport> Engine<'_, T> {
                     if payload.len() != 3 {
                         return Err(ProbeErrorKind::InvalidReply);
                     }
+                    let declared = usize::from(payload[0]);
+                    if declared < payload.len() {
+                        return Err(ProbeErrorKind::InvalidReply);
+                    }
+                    if declared > payload.len() {
+                        self.disagreement_count = self.disagreement_count.saturating_add(1);
+                    }
                     break;
                 }
                 if payload[2] == transaction {
@@ -835,6 +842,7 @@ fn run_with_evidence<T: Transport>(
     let cleanup_now = engine.now();
     if result.is_ok() {
         if cancelled.load(Ordering::Acquire) {
+            engine.stage = Stage::Cleanup;
             result = Err(ProbeErrorKind::Cancelled);
         } else if let Err(error) = cleanup_now {
             result = Err(error);
@@ -881,6 +889,12 @@ fn run_with_evidence<T: Transport>(
             } else {
                 CloseStatus::WriteFailed
             };
+            if matches!(close_result, Err(ProbeErrorKind::Cancelled))
+                || cancelled.load(Ordering::Acquire)
+            {
+                engine.stage = Stage::Cleanup;
+                result = Err(ProbeErrorKind::Cancelled);
+            }
         }
     }
     let outcome = match result {
@@ -923,7 +937,12 @@ fn run_with_evidence<T: Transport>(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, collections::VecDeque, rc::Rc, sync::atomic::AtomicBool};
+    use std::{
+        cell::RefCell,
+        collections::VecDeque,
+        rc::Rc,
+        sync::{Arc, atomic::AtomicBool},
+    };
 
     struct Fake {
         now: u64,
@@ -935,6 +954,10 @@ mod tests {
         idle_step: u64,
         clock_calls: usize,
         regress_at_call: Option<usize>,
+        read_calls: usize,
+        cancel_on_read_at: Option<usize>,
+        cancel_on_write_at: Option<usize>,
+        cancel_flag: Option<Arc<AtomicBool>>,
     }
 
     impl Fake {
@@ -949,6 +972,10 @@ mod tests {
                 idle_step: 1,
                 clock_calls: 0,
                 regress_at_call: None,
+                read_calls: 0,
+                cancel_on_read_at: None,
+                cancel_on_write_at: None,
+                cancel_flag: None,
             }
         }
     }
@@ -971,18 +998,29 @@ mod tests {
                     native_code: Some(5),
                 });
             }
+            if self.cancel_on_write_at == Some(self.write_calls)
+                && let Some(flag) = &self.cancel_flag
+            {
+                flag.store(true, Ordering::Release);
+            }
             let count = bytes.len().min(self.max_write);
             self.writes.borrow_mut().push(bytes[..count].to_vec());
             Ok(count)
         }
 
         fn read(&mut self, bytes: &mut [u8]) -> Result<ReadResult, TransportError> {
+            self.read_calls += 1;
             if let Some(front) = self.reads.front_mut() {
                 let count = front.len().min(bytes.len());
                 bytes[..count].copy_from_slice(&front[..count]);
                 front.drain(..count);
                 if front.is_empty() {
                     self.reads.pop_front();
+                }
+                if self.cancel_on_read_at == Some(self.read_calls)
+                    && let Some(flag) = &self.cancel_flag
+                {
+                    flag.store(true, Ordering::Release);
                 }
                 return Ok(ReadResult::Data(count));
             }
@@ -1258,6 +1296,78 @@ mod tests {
         assert_eq!(report.pattern, "correlated_replies_only");
         assert_eq!(report.progress.frames_received, 6);
         assert_eq!(report.progress.firmware_request.written_bytes, 9);
+    }
+
+    #[test]
+    fn correlated_pattern_reply_checks_inner_length_and_counts_disagreement() {
+        let mut reads = valid_reads();
+        reads.extend([
+            frame(&[4, 0x10, 3]),
+            frame(&[3, 0x0f, 4]),
+            frame(&[3, 0x10, 5]),
+            frame(&[3, 0x0f, 6]),
+        ]);
+        let report = run_fake(
+            Options {
+                test_pattern: true,
+                capture_ms: 0,
+                ..Options::default()
+            },
+            Fake::new(reads),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(report.reply_length_disagreements, 1);
+
+        let mut reads = valid_reads();
+        reads.push(frame(&[2, 0x10, 3]));
+        let failure = run_fake(
+            Options {
+                test_pattern: true,
+                capture_ms: 0,
+                ..Options::default()
+            },
+            Fake::new(reads),
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert_eq!(failure.kind, ProbeErrorKind::InvalidReply);
+    }
+
+    #[test]
+    fn cancellation_skips_close_and_cancellation_during_close_is_returned() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut fake = Fake::new(valid_reads());
+        fake.cancel_flag = Some(Arc::clone(&cancelled));
+        fake.cancel_on_read_at = Some(3);
+        let failure = run_fake(
+            Options {
+                capture_ms: 0,
+                ..Options::default()
+            },
+            fake,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert_eq!(failure.kind, ProbeErrorKind::Cancelled);
+        assert_eq!(failure.progress.session_close, CloseStatus::Skipped);
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut fake = Fake::new(valid_reads());
+        fake.cancel_flag = Some(Arc::clone(&cancelled));
+        fake.cancel_on_write_at = Some(4);
+        let failure = run_fake(
+            Options {
+                capture_ms: 0,
+                ..Options::default()
+            },
+            fake,
+            &cancelled,
+        )
+        .unwrap_err();
+        assert_eq!(failure.kind, ProbeErrorKind::Cancelled);
+        assert_eq!(failure.stage, Stage::Cleanup);
+        assert_eq!(failure.progress.session_close, CloseStatus::Sent);
     }
 
     #[test]
