@@ -3,6 +3,8 @@ use std::fmt::Write as _;
 use serde_json::Value;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
+use super::value::{JsonSerializeError, MAX_REPLAY_JSON_BYTES, MAX_REPLAY_JSON_DEPTH};
+
 const SURROGATE_MARKER: char = '\u{fdd0}';
 
 fn take_surrogate_token(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<u16> {
@@ -337,9 +339,244 @@ fn render(
     Ok(())
 }
 
+enum ReplayEntry<'a> {
+    Array(&'a Value),
+    Object(&'a str, &'a Value),
+}
+
+enum ReplayFrame<'a> {
+    Array {
+        values: std::slice::Iter<'a, Value>,
+        depth: usize,
+        first: bool,
+    },
+    Object {
+        values: serde_json::map::Iter<'a>,
+        depth: usize,
+        first: bool,
+    },
+}
+
+impl<'a> ReplayFrame<'a> {
+    fn next(&mut self) -> Option<(ReplayEntry<'a>, usize, bool)> {
+        match self {
+            Self::Array {
+                values,
+                depth,
+                first,
+            } => {
+                let value = values.next()?;
+                let was_first = *first;
+                *first = false;
+                Some((ReplayEntry::Array(value), *depth, was_first))
+            }
+            Self::Object {
+                values,
+                depth,
+                first,
+            } => {
+                let (key, value) = values.next()?;
+                let was_first = *first;
+                *first = false;
+                Some((ReplayEntry::Object(key, value), *depth, was_first))
+            }
+        }
+    }
+
+    fn depth(&self) -> usize {
+        match self {
+            Self::Array { depth, .. } | Self::Object { depth, .. } => *depth,
+        }
+    }
+}
+
+struct ReplayWriter {
+    output: String,
+}
+
+impl ReplayWriter {
+    fn push_str(&mut self, text: &str) -> Result<(), JsonSerializeError> {
+        if self.output.len().saturating_add(text.len()) > MAX_REPLAY_JSON_BYTES {
+            return Err(JsonSerializeError::SizeLimit);
+        }
+        self.output.push_str(text);
+        Ok(())
+    }
+
+    fn push_char(&mut self, character: char) -> Result<(), JsonSerializeError> {
+        if self.output.len().saturating_add(character.len_utf8()) > MAX_REPLAY_JSON_BYTES {
+            return Err(JsonSerializeError::SizeLimit);
+        }
+        self.output.push(character);
+        Ok(())
+    }
+
+    fn push_indent(&mut self, depth: usize) -> Result<(), JsonSerializeError> {
+        for _ in 0..depth {
+            self.push_str("  ")?;
+        }
+        Ok(())
+    }
+
+    fn push_unit_escape(&mut self, unit: u16) -> Result<(), JsonSerializeError> {
+        self.push_str("\\u")?;
+        for shift in [12, 8, 4, 0] {
+            let digit = u32::from((unit >> shift) & 0x0f);
+            self.push_char(char::from_digit(digit, 16).expect("hex digit"))?;
+        }
+        Ok(())
+    }
+
+    fn push_json_character(&mut self, character: char) -> Result<(), JsonSerializeError> {
+        match character {
+            '"' => self.push_str("\\\""),
+            '\\' => self.push_str("\\\\"),
+            '\u{8}' => self.push_str("\\b"),
+            '\u{c}' => self.push_str("\\f"),
+            '\n' => self.push_str("\\n"),
+            '\r' => self.push_str("\\r"),
+            '\t' => self.push_str("\\t"),
+            character if character <= '\u{1f}' => self.push_unit_escape(character as u16),
+            character => self.push_char(character),
+        }
+    }
+
+    fn push_json_string(
+        &mut self,
+        text: &str,
+        surrogate_tokens: bool,
+    ) -> Result<(), JsonSerializeError> {
+        self.push_char('"')?;
+        let mut chars = text.chars().peekable();
+        while let Some(character) = chars.next() {
+            if surrogate_tokens && character == SURROGATE_MARKER {
+                if chars.peek() == Some(&SURROGATE_MARKER) {
+                    chars.next();
+                } else if let Some(unit) = take_surrogate_token(&mut chars) {
+                    self.push_unit_escape(unit)?;
+                    continue;
+                }
+            }
+            self.push_json_character(character)?;
+        }
+        self.push_char('"')
+    }
+}
+
+pub(crate) fn serialize_replay_json(
+    value: &Value,
+    surrogate_tokens: bool,
+    pretty: bool,
+) -> Result<String, JsonSerializeError> {
+    let mut writer = ReplayWriter {
+        output: String::new(),
+    };
+    let mut pending = Vec::new();
+    let mut current = Some((value, 0));
+    loop {
+        if let Some((value, depth)) = current.take() {
+            match value {
+                Value::Null => writer.push_str("null")?,
+                Value::Bool(value) => {
+                    writer.push_str(if *value { "true" } else { "false" })?;
+                }
+                Value::Number(number) => writer.push_str(&number.to_string())?,
+                Value::String(text) => {
+                    writer.push_json_string(text, surrogate_tokens)?;
+                }
+                Value::Array(values) => {
+                    if depth >= MAX_REPLAY_JSON_DEPTH {
+                        return Err(JsonSerializeError::DepthLimit);
+                    }
+                    writer.push_char('[')?;
+                    if values.is_empty() {
+                        writer.push_char(']')?;
+                    } else {
+                        if pretty {
+                            writer.push_char('\n')?;
+                        }
+                        pending
+                            .try_reserve(1)
+                            .map_err(|_| JsonSerializeError::SizeLimit)?;
+                        pending.push(ReplayFrame::Array {
+                            values: values.iter(),
+                            depth,
+                            first: true,
+                        });
+                    }
+                }
+                Value::Object(values) => {
+                    if depth >= MAX_REPLAY_JSON_DEPTH {
+                        return Err(JsonSerializeError::DepthLimit);
+                    }
+                    writer.push_char('{')?;
+                    if values.is_empty() {
+                        writer.push_char('}')?;
+                    } else {
+                        if pretty {
+                            writer.push_char('\n')?;
+                        }
+                        pending
+                            .try_reserve(1)
+                            .map_err(|_| JsonSerializeError::SizeLimit)?;
+                        pending.push(ReplayFrame::Object {
+                            values: values.iter(),
+                            depth,
+                            first: true,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+
+        if let Some((entry, depth, first)) = pending.last_mut().and_then(ReplayFrame::next) {
+            if !first {
+                writer.push_char(',')?;
+                if pretty {
+                    writer.push_char('\n')?;
+                }
+            }
+            if pretty {
+                writer.push_indent(depth + 1)?;
+            }
+            match entry {
+                ReplayEntry::Array(value) => current = Some((value, depth + 1)),
+                ReplayEntry::Object(key, value) => {
+                    writer.push_json_string(key, surrogate_tokens)?;
+                    writer.push_str(if pretty { ": " } else { ":" })?;
+                    current = Some((value, depth + 1));
+                }
+            }
+            continue;
+        }
+
+        let Some(frame) = pending.pop() else {
+            break;
+        };
+        if pretty {
+            writer.push_char('\n')?;
+            writer.push_indent(frame.depth())?;
+        }
+        writer.push_char(match frame {
+            ReplayFrame::Array { .. } => ']',
+            ReplayFrame::Object { .. } => '}',
+        })?;
+    }
+    Ok(writer.output)
+}
+
 pub(crate) fn repr_value(value: &Value) -> String {
+    repr_value_with_tokens(value, true)
+}
+
+pub(crate) fn repr_plain_value(value: &Value) -> String {
+    repr_value_with_tokens(value, false)
+}
+
+fn repr_value_with_tokens(value: &Value, surrogate_tokens: bool) -> String {
     let mut result = String::new();
-    render(&mut result, value, true, true).expect("Python rendering cannot fail");
+    render(&mut result, value, true, surrogate_tokens).expect("Python rendering cannot fail");
     result
 }
 

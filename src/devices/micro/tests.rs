@@ -193,6 +193,75 @@ fn json_surrogates_are_preserved_and_decoder_accepts_following_responses() {
 }
 
 #[test]
+fn replay_json_roundtrips_surrogates_and_formats_objects_prettily() {
+    let parsed =
+        super::value::parse_json(br#"{"high":"\ud800","low":"\udfff","pair":"\ud83d\ude00"}"#)
+            .unwrap();
+    let compact = parsed.to_json().unwrap();
+    assert!(compact.contains(r#""high":"\ud800""#), "{compact:?}");
+    assert!(compact.contains(r#""low":"\udfff""#), "{compact:?}");
+    assert!(compact.contains(r#""pair":"😀""#), "{compact:?}");
+    assert_eq!(
+        super::value::parse_json(compact.as_bytes()).unwrap(),
+        parsed
+    );
+
+    let object = parsed.into_object().unwrap();
+    assert_eq!(object.to_json().unwrap(), compact);
+    let pretty = object.to_pretty_json().unwrap();
+    assert_eq!(
+        pretty,
+        "{\n  \"high\": \"\\ud800\",\n  \"low\": \"\\udfff\",\n  \"pair\": \"😀\"\n}"
+    );
+    let roundtrip = super::value::parse_json(pretty.as_bytes()).unwrap();
+    assert_eq!(roundtrip.as_value(), object.as_value());
+
+    let literal_marker = super::value::JsonValue::from_value(json!("\u{fdd0}sD800"));
+    let replay = literal_marker.to_json().unwrap();
+    let decoded: Value = serde_json::from_str(&replay).unwrap();
+    assert_eq!(&decoded, literal_marker.as_value());
+
+    let nested = super::value::JsonValue::from_value(json!({"items":[1,{"ok":true}]}));
+    assert_eq!(
+        nested.to_pretty_json().unwrap(),
+        "{\n  \"items\": [\n    1,\n    {\n      \"ok\": true\n    }\n  ]\n}"
+    );
+}
+
+#[test]
+fn replay_json_enforces_depth_and_output_size_limits() {
+    use super::value::{
+        JsonSerializeError, JsonValue, MAX_REPLAY_JSON_BYTES, MAX_REPLAY_JSON_DEPTH,
+    };
+
+    let mut at_limit = Value::Null;
+    for _ in 0..MAX_REPLAY_JSON_DEPTH {
+        at_limit = Value::Array(vec![at_limit]);
+    }
+    let at_limit = JsonValue::from_value(at_limit);
+    assert!(at_limit.to_json().is_ok());
+
+    let mut too_deep = Value::Null;
+    for _ in 0..=MAX_REPLAY_JSON_DEPTH {
+        too_deep = Value::Array(vec![too_deep]);
+    }
+    let too_deep = JsonValue::from_value(too_deep);
+    assert_eq!(too_deep.to_json(), Err(JsonSerializeError::DepthLimit));
+
+    let at_size_limit = JsonValue::from_value(Value::String("x".repeat(MAX_REPLAY_JSON_BYTES - 2)));
+    assert_eq!(
+        at_size_limit.to_json().unwrap().len(),
+        MAX_REPLAY_JSON_BYTES
+    );
+    let over_size_limit =
+        JsonValue::from_value(Value::String("x".repeat(MAX_REPLAY_JSON_BYTES - 1)));
+    assert_eq!(
+        over_size_limit.to_json(),
+        Err(JsonSerializeError::SizeLimit)
+    );
+}
+
+#[test]
 fn decoder_size_boundary_retains_overflow_and_empty_chunks_do_not_check_age() {
     let mut decoder = Decoder::new();
     let data = [b'x'; 61];

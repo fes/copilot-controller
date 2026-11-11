@@ -2,9 +2,13 @@ use std::fmt;
 
 use serde_json::{Map, Value, value::RawValue};
 
-use super::json::repr_value;
+use super::json::{repr_value, serialize_replay_json};
 
 const SURROGATE_MARKER: char = '\u{fdd0}';
+/// Maximum encoded size returned by the replay JSON serializers.
+pub const MAX_REPLAY_JSON_BYTES: usize = 1_048_576;
+/// Maximum number of nested containers accepted by the replay JSON serializers.
+pub const MAX_REPLAY_JSON_DEPTH: usize = 256;
 
 fn append_surrogate(output: &mut String, unit: u16) {
     output.push(SURROGATE_MARKER);
@@ -22,24 +26,66 @@ fn append_scalar(output: &mut String, scalar: char) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonSerializeError {
+    /// The output would exceed [`MAX_REPLAY_JSON_BYTES`].
+    SizeLimit,
+    /// The value contains more than [`MAX_REPLAY_JSON_DEPTH`] nested containers.
+    DepthLimit,
+}
+
+impl fmt::Display for JsonSerializeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::SizeLimit => "JSON replay exceeds the size limit",
+            Self::DepthLimit => "JSON replay exceeds the depth limit",
+        })
+    }
+}
+
+impl std::error::Error for JsonSerializeError {}
+
 /// An owned JSON value whose destruction does not recurse through nested data.
-pub struct JsonValue(Option<Value>);
+pub struct JsonValue {
+    value: Option<Value>,
+    surrogate_tokens: bool,
+}
 
 impl JsonValue {
     pub fn from_value(value: Value) -> Self {
-        Self(Some(value))
+        Self {
+            value: Some(value),
+            surrogate_tokens: false,
+        }
+    }
+
+    fn from_parsed_value(value: Value) -> Self {
+        Self {
+            value: Some(value),
+            surrogate_tokens: true,
+        }
     }
 
     pub fn as_value(&self) -> &Value {
-        self.0.as_ref().expect("JSON value is present")
+        self.value.as_ref().expect("JSON value is present")
     }
 
     fn as_value_mut(&mut self) -> &mut Value {
-        self.0.as_mut().expect("JSON value is present")
+        self.value.as_mut().expect("JSON value is present")
     }
 
     pub fn as_object(&self) -> Option<&Map<String, Value>> {
         self.as_value().as_object()
+    }
+
+    /// Serializes this value as compact JSON, preserving escaped surrogate code units.
+    pub fn to_json(&self) -> Result<String, JsonSerializeError> {
+        serialize_replay_json(self.as_value(), self.surrogate_tokens, false)
+    }
+
+    /// Serializes this value as two-space-indented JSON, preserving escaped surrogate code units.
+    pub fn to_pretty_json(&self) -> Result<String, JsonSerializeError> {
+        serialize_replay_json(self.as_value(), self.surrogate_tokens, true)
     }
 
     pub(crate) fn into_object(self) -> Result<JsonObject, Self> {
@@ -63,7 +109,7 @@ fn drop_values(mut values: Vec<Value>) {
 
 impl Drop for JsonValue {
     fn drop(&mut self) {
-        if let Some(value) = self.0.take() {
+        if let Some(value) = self.value.take() {
             drop_values(vec![value]);
         }
     }
@@ -71,7 +117,11 @@ impl Drop for JsonValue {
 
 impl fmt::Debug for JsonValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&repr_value(self.as_value()))
+        if self.surrogate_tokens {
+            f.write_str(&repr_value(self.as_value()))
+        } else {
+            f.write_str(&super::json::repr_plain_value(self.as_value()))
+        }
     }
 }
 
@@ -144,13 +194,27 @@ impl JsonObject {
         self.as_map().contains_key(key)
     }
 
+    /// Serializes this object as compact JSON, preserving escaped surrogate code units.
+    pub fn to_json(&self) -> Result<String, JsonSerializeError> {
+        self.0.to_json()
+    }
+
+    /// Serializes this object as two-space-indented JSON, preserving escaped surrogate code units.
+    pub fn to_pretty_json(&self) -> Result<String, JsonSerializeError> {
+        self.0.to_pretty_json()
+    }
+
     pub(crate) fn remove(&mut self, key: &str) -> Option<JsonValue> {
+        let surrogate_tokens = self.0.surrogate_tokens;
         self.0
             .as_value_mut()
             .as_object_mut()
             .expect("JSON object is present")
             .remove(key)
-            .map(JsonValue::from_value)
+            .map(|value| JsonValue {
+                value: Some(value),
+                surrogate_tokens,
+            })
     }
 }
 
@@ -189,7 +253,7 @@ fn attach_value(frames: &mut Frames, root: &mut Option<JsonValue>, value: Value)
                 drop_values(vec![previous]);
             }
         }
-        None => *root = Some(JsonValue::from_value(value)),
+        None => *root = Some(JsonValue::from_parsed_value(value)),
     }
 }
 
