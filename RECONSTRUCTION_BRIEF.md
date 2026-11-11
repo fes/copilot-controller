@@ -599,6 +599,15 @@ State storage is library-only. There is no public CLI for production migration,
 initialization, mutation, or recovery. A caller supplies an existing approved
 absolute local root; no implicit home-directory or temp-directory default.
 
+The Rust API is `persistence::state_store::StateStore`: callers explicitly
+initialize, load, or transact with an expected store revision. Recovery is
+never automatic; callers inspect `plan_recovery(expected_revision)` and pass
+an explicit `KeepCurrent` or `CompletePrepared` decision to `recover`. The
+separate `persistence::ownership::RuntimeOwnerLease` takes a caller-selected
+authority root, independent of each configuration root, and locks its existing
+empty `runtime-owner.lock` anchor without writing owner data or taking over a
+held lock.
+
 Files:
 
 - `core-state.json`: committed snapshot.

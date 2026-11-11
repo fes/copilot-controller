@@ -73,6 +73,13 @@ pub struct Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+pub type RootError = Error;
+pub type RootErrorKind = ErrorKind;
+
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) fn create_test_private_directory(path: &Path) -> Result<()> {
+    native::create_test_private_directory(path)
+}
 
 impl Error {
     fn new(kind: ErrorKind, operation: &'static str) -> Self {
@@ -301,6 +308,26 @@ impl PrivateRoot {
                 }
             }
         };
+        if self.inner.check_file(Some(name), &file, false)? != 0 {
+            return Err(Error::new(ErrorKind::Changed, "lock_nonempty"));
+        }
+        native::try_lock(&file.file)?;
+        let guard = LockGuard {
+            root: self.clone(),
+            name: name.clone(),
+            file,
+        };
+        guard.validate()?;
+        Ok(guard)
+    }
+
+    /// Try a nonblocking lock on an existing anchor without creating it.
+    pub fn try_lock_existing(&self, name: &Name) -> Result<LockGuard> {
+        self.validate()?;
+        let file = self
+            .inner
+            .open_file(name, true)?
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, "lock_open"))?;
         if self.inner.check_file(Some(name), &file, false)? != 0 {
             return Err(Error::new(ErrorKind::Changed, "lock_nonempty"));
         }

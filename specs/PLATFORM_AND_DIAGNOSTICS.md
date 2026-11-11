@@ -840,6 +840,10 @@ Acquisition:
 5. Validate root/held-file/name association through safe-root lock validator; failure `ownership_changed`.
 6. Hold root/file; generate fresh random runtime epoch.
 
+The Rust `RuntimeOwnerLease` API receives the approved authority root
+explicitly. It does not derive that root from a configuration root, create a
+missing anchor, write owner data, or infer a dead owner.
+
 Every epoch read rechecks zero length and root/held-file/name association before returning same epoch. Metadata failure unavailable; size/association failure ownership_changed.
 
 No owner data is written, no PID-liveness test, no force-unlock, no takeover, no durable fencing generation, no journal, no termination of competing runtime.
