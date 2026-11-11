@@ -720,7 +720,7 @@ impl ProbeSession<'_> {
                 ReadOutcome::Ignored | ReadOutcome::Idle => {}
             }
         }
-        Ok(true)
+        Ok(!cleanup || self.report.read_reports < READ_BUDGET)
     }
 
     fn capture(&mut self, duration: Duration) -> Result<(), String> {
@@ -967,7 +967,7 @@ mod tests {
     }
 
     fn run_qualified(
-        fake: &mut Fake,
+        fake: &mut dyn ProbeIo,
         descriptor: &HidDescriptor,
         options: MicroProbeOptions,
     ) -> MicroProbeResult {
@@ -1483,6 +1483,78 @@ mod tests {
                 Some(&serde_json::to_value(shutdown_frame()).unwrap()),
             );
         }
+    }
+
+    #[test]
+    fn cleanup_budget_exhausted_exactly_at_drain_deadline_reports_incomplete_cleanup() {
+        struct DeadlineRead {
+            inner: Fake,
+            reports: usize,
+        }
+        impl ProbeIo for DeadlineRead {
+            fn now(&self) -> Duration {
+                self.inner.now()
+            }
+            fn write(&mut self, report: &[u8]) -> Result<usize, HidError> {
+                self.inner.write(report)
+            }
+            fn read(&mut self, max_len: usize, timeout: Duration) -> Result<Vec<u8>, HidError> {
+                assert!(self.reports < READ_BUDGET, "read after budget exhaustion");
+                let report = self.inner.read(max_len, timeout)?;
+                if !report.is_empty() {
+                    self.reports += 1;
+                    if self.reports == READ_BUDGET {
+                        self.inner.now += timeout;
+                    }
+                }
+                Ok(report)
+            }
+        }
+        let (mut fake, pattern_complete) = pattern_flow_fake(true, false);
+        let cleanup_reply = fake.reply_after_writes.pop_back().unwrap();
+        fake.reply_after_writes.extend(std::iter::repeat_n(
+            (pattern_complete, vec![1]),
+            READ_BUDGET - 3,
+        ));
+        fake.reply_after_writes.push_back(cleanup_reply);
+        let mut io = DeadlineRead {
+            inner: fake,
+            reports: 0,
+        };
+        let result = run_qualified(
+            &mut io,
+            &descriptor(),
+            MicroProbeOptions {
+                query: true,
+                test_pattern: true,
+                capture_ms: 0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(io.reports, READ_BUDGET);
+        assert_eq!(result.report.read_reports, READ_BUDGET);
+        assert_eq!(result.report.elapsed_ms, 150);
+        assert_eq!(
+            result.report.cleanup_error.as_deref(),
+            Some(
+                "Micro read budget exhausted; cleanup drain incomplete; shutdown written without acknowledgement"
+            ),
+        );
+        assert_eq!(result.error, result.report.cleanup_error);
+        assert!(!result.probe_succeeded && !result.report.led_clear_acknowledged);
+        assert!(result.report.led_test_attempted && !result.report.write_failed);
+        let shutdown_count = RpcClient::new()
+            .begin_led(&shutdown_frame())
+            .unwrap()
+            .reports
+            .len();
+        assert_eq!(io.inner.writes.len(), pattern_complete + shutdown_count);
+        assert_eq!(result.report.output_attempts, io.inner.writes.len());
+        assert_eq!(result.report.output_reports, io.inner.writes.len());
+        assert_eq!(
+            io.inner.incoming,
+            VecDeque::from([response(104, Value::Null)])
+        );
     }
 
     #[test]
