@@ -112,6 +112,7 @@ impl UpdateOutcome {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn success(mut report: UpdateReport) -> Self {
         report.phase = UpdatePhase::Complete;
         Self {

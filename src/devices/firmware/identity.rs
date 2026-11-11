@@ -231,6 +231,7 @@ pub(crate) fn open_qualified<B: MaintenanceBackend>(
     backend: &mut B,
     open: &mut bool,
     pins: &[DescriptorPin<'_>],
+    location: u64,
 ) -> Result<(), FirmwareError> {
     backend.check_cancelled().map_err(backend_error)?;
     let candidates = backend.enumerate_hid().map_err(backend_error)?;
@@ -250,6 +251,11 @@ pub(crate) fn open_qualified<B: MaintenanceBackend>(
         ));
     }
     let candidate = matches[0];
+    if candidate.location_id != Some(location) || location == 0 {
+        return Err(FirmwareError::new(
+            "USB HID candidate location does not match registry",
+        ));
+    }
     let opened = backend.open_hid(candidate).map_err(backend_error)?;
     *open = true;
     check_opened(candidate, &opened, pins)
@@ -265,6 +271,7 @@ fn check_opened(
         || opened.interface_number != candidate.interface_number
         || opened.transport != candidate.transport
         || opened.path != candidate.path
+        || opened.location_id != candidate.location_id
         || opened.report_descriptor.len() > 1024
     {
         return Err(FirmwareError::new("opened USB HID identity changed"));

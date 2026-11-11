@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -244,6 +244,9 @@ pub enum Fault {
     FinalVersion(&'static str),
     FinalClose,
     CancelAfterFinalClose,
+    CandidateLocation(Option<u64>, bool),
+    OpenedLocation(Option<u64>, bool),
+    SyncFailure(usize),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -262,6 +265,7 @@ pub struct FakeBackend {
     pub close_count: usize,
     pub open_count: usize,
     pub clock: Duration,
+    pub sync_count: usize,
     state: UsbState,
     app_queries: usize,
     boot_queries: usize,
@@ -282,6 +286,7 @@ impl FakeBackend {
             close_count: 0,
             open_count: 0,
             clock: Duration::ZERO,
+            sync_count: 0,
             state: UsbState::Application,
             app_queries: 0,
             boot_queries: 0,
@@ -414,6 +419,34 @@ impl MaintenanceBackend for FakeBackend {
         } else {
             Ok(())
         }
+    }
+
+    fn full_sync(&mut self, file: &File) -> Result<(), BackendError> {
+        self.sync_count += 1;
+        self.events.push("synthetic full sync");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let workspace = self.calls[0].program.parent().unwrap();
+            let expected = match self.sync_count {
+                1 => workspace.join("full-flash.bin"),
+                2 => workspace.join("SHA256SUMS"),
+                3 => workspace.to_owned(),
+                4 => workspace.parent().unwrap().to_owned(),
+                _ => panic!("unexpected sync"),
+            };
+            let actual = file.metadata().unwrap();
+            let expected = fs::metadata(expected).unwrap();
+            assert_eq!(
+                (actual.dev(), actual.ino()),
+                (expected.dev(), expected.ino())
+            );
+        }
+        if self.fault == Fault::SyncFailure(self.sync_count) {
+            return Err(BackendError::Failure("synthetic sync failed".into()));
+        }
+        file.sync_all()
+            .map_err(|error| BackendError::Failure(error.to_string()))
     }
 
     fn check_cancelled(&mut self) -> Result<(), BackendError> {
@@ -572,7 +605,13 @@ impl MaintenanceBackend for FakeBackend {
             interface_number: 2,
             transport: HidTransport::Usb,
             path: OsString::from("synthetic-hid-identity"),
+            location_id: Some(123),
         };
+        if let Fault::CandidateLocation(location, final_phase) = self.fault
+            && (self.state == UsbState::FinalApplication) == final_phase
+        {
+            candidate.location_id = location;
+        }
         match self.fault {
             Fault::Candidate(CandidateMutation::Vendor) => candidate.vendor_id ^= 1,
             Fault::Candidate(CandidateMutation::Product) => candidate.product_id ^= 1,
@@ -621,7 +660,13 @@ impl MaintenanceBackend for FakeBackend {
                 candidate.path.clone()
             },
             report_descriptor: descriptor,
+            location_id: candidate.location_id,
         };
+        if let Fault::OpenedLocation(location, final_phase) = self.fault
+            && (self.state == UsbState::FinalApplication) == final_phase
+        {
+            opened.location_id = location;
+        }
         match self.fault {
             Fault::Opened(OpenedMutation::Vendor) => opened.vendor_id ^= 1,
             Fault::Opened(OpenedMutation::Product) => opened.product_id ^= 1,

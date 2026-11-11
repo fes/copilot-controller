@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fmt;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -7,7 +8,6 @@ use std::time::Duration;
 pub enum BackendError {
     Cancelled,
     Timeout,
-    OutputLimit,
     Failure(String),
 }
 
@@ -16,7 +16,6 @@ impl fmt::Display for BackendError {
         match self {
             Self::Cancelled => formatter.write_str("maintenance cancelled"),
             Self::Timeout => formatter.write_str("operation timed out"),
-            Self::OutputLimit => formatter.write_str("operation exceeded its output limit"),
             Self::Failure(message) => formatter.write_str(message),
         }
     }
@@ -53,6 +52,8 @@ pub struct HidCandidate {
     pub interface_number: i32,
     pub transport: HidTransport,
     pub path: OsString,
+    /// Physical USB host-device location, obtained from registry ancestry.
+    pub location_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,6 +63,8 @@ pub struct HidOpened {
     pub interface_number: i32,
     pub transport: HidTransport,
     pub path: OsString,
+    /// Independently obtained from the opened HID's registry ancestry.
+    pub location_id: Option<u64>,
     pub report_descriptor: Vec<u8>,
 }
 
@@ -155,6 +158,11 @@ pub trait MaintenanceBackend {
     fn acquire_lease(&mut self) -> Result<Self::Lease, BackendError>;
     fn set_private_umask(&mut self, mask: u32) -> Result<(), BackendError>;
     fn authorize_backup_path(&mut self, path: &Path) -> Result<(), BackendError>;
+    /// Flush this open file or directory through to permanent storage. On macOS
+    /// this requires F_FULLFSYNC, including for directories; never fall back to
+    /// fsync if unsupported or unsuccessful. A synthetic backend is not proof
+    /// of durability. The native worker must supply a real implementation.
+    fn full_sync(&mut self, file: &File) -> Result<(), BackendError>;
     fn check_cancelled(&mut self) -> Result<(), BackendError>;
     fn monotonic_now(&mut self) -> Result<Duration, BackendError>;
     fn sleep(&mut self, duration: Duration) -> Result<(), BackendError>;

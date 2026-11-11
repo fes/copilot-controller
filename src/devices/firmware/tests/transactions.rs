@@ -240,6 +240,61 @@ fn each_hid_identity_dimension_is_checked_before_bootloader_entry() {
 }
 
 #[test]
+fn hid_location_swaps_cannot_authorize_bootloader_or_final_version() {
+    for final_phase in [false, true] {
+        for location in [None, Some(0), Some(124)] {
+            for fault in [
+                Fault::CandidateLocation(location, final_phase),
+                Fault::OpenedLocation(location, final_phase),
+            ] {
+                let run = run(fault.clone(), false);
+                failed(
+                    &run,
+                    if final_phase {
+                        UpdatePhase::VerifyingRunningFirmware
+                    } else {
+                        UpdatePhase::QualifyingUsbTarget
+                    },
+                );
+                assert_eq!(
+                    run.outcome.report.bootloader_entry_attempted, final_phase,
+                    "{fault:?}"
+                );
+                assert_eq!(run.outcome.report.running_version, None, "{fault:?}");
+                let version_queries = run
+                    .backend
+                    .hid_reports
+                    .iter()
+                    .filter(|packet| packet[3..].starts_with(br#"{"method":"sys.version""#))
+                    .count();
+                assert_eq!(version_queries, usize::from(final_phase), "{fault:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn failed_recovery_flush_never_authorizes_a_write() {
+    for step in 1..=4 {
+        let run = run(Fault::SyncFailure(step), false);
+        failed(&run, UpdatePhase::PersistingBackup);
+        assert_eq!(run.backend.sync_count, step);
+        assert!(!run.outcome.report.backup_verified);
+        assert!(!run.outcome.report.flash_write_attempted);
+        assert!(
+            !run.backend
+                .operations()
+                .contains(&ToolOperation::VerifyBackup)
+        );
+        assert!(
+            !run.backend
+                .operations()
+                .contains(&ToolOperation::WriteImage)
+        );
+    }
+}
+
+#[test]
 fn success_requires_every_gate_and_exact_tool_contract() {
     let run = run(Fault::None, true);
     let report = &run.outcome.report;
@@ -257,6 +312,7 @@ fn success_requires_every_gate_and_exact_tool_contract() {
     assert_eq!(run.backend.operations(), ORDER);
     assert_eq!(run.backend.open_count, 2);
     assert_eq!(run.backend.close_count, 2);
+    assert_eq!(run.backend.sync_count, 4);
 
     let workspace = fs::canonicalize(&run.options.backup_dir).unwrap();
     for (index, call) in run.backend.calls.iter().enumerate() {

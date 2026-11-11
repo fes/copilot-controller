@@ -1,18 +1,26 @@
-use std::fs::{File, Metadata, OpenOptions, symlink_metadata};
+#[cfg(test)]
+use std::fs::File;
+use std::fs::{Metadata, OpenOptions, symlink_metadata};
 use std::io::Read;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
 use super::FirmwareError;
+#[cfg(test)]
+use super::backend::MaintenanceBackend;
 
 pub(crate) const IMAGE_SIZE: u64 = 2_214_944;
 pub(crate) const TOOL_SIZE: u64 = 13_920_608;
+#[cfg(test)]
 pub(crate) const FLASH_SIZE: u64 = 0x1000000;
+#[cfg(test)]
 pub(crate) const PARTITION_START: usize = 0x8000;
 pub(crate) const PARTITION_END: usize = 0x9000;
 pub(crate) const SETTINGS_START: usize = 0x810000;
+#[cfg(test)]
 pub(crate) const SETTINGS_SIZE: usize = 0x220000;
+#[cfg(test)]
 pub(crate) const SETTINGS_END: usize = SETTINGS_START + SETTINGS_SIZE;
 
 #[derive(Clone, Copy)]
@@ -140,7 +148,12 @@ pub(crate) fn verify_image_extent(image: &[u8]) -> Result<(), FirmwareError> {
     Ok(())
 }
 
-pub(crate) fn sync_regular(path: &Path, expected: u64) -> Result<(), FirmwareError> {
+#[cfg(test)]
+pub(crate) fn sync_regular<B: MaintenanceBackend>(
+    backend: &mut B,
+    path: &Path,
+    expected: u64,
+) -> Result<(), FirmwareError> {
     // The full bounded read also rejects a replaced path before syncing.
     let _ = read_exact_regular(path, expected)?;
     let mut options = OpenOptions::new();
@@ -153,14 +166,24 @@ pub(crate) fn sync_regular(path: &Path, expected: u64) -> Result<(), FirmwareErr
     let file: File = options
         .open(path)
         .map_err(|error| FirmwareError::new(format!("cannot open file to sync: {error}")))?;
-    if !regular_size(
-        &file
-            .metadata()
-            .map_err(|error| FirmwareError::new(format!("cannot inspect file to sync: {error}")))?,
-        expected,
-    ) {
+    let opened = file
+        .metadata()
+        .map_err(|error| FirmwareError::new(format!("cannot inspect file to sync: {error}")))?;
+    let current = symlink_metadata(path)
+        .map_err(|error| FirmwareError::new(format!("cannot recheck file to sync: {error}")))?;
+    if !regular_size(&opened, expected)
+        || !regular_size(&current, expected)
+        || !same_file(&opened, &current)
+    {
         return Err(FirmwareError::new("file changed before sync"));
     }
-    file.sync_all()
-        .map_err(|error| FirmwareError::new(format!("cannot sync file: {error}")))
+    backend
+        .full_sync(&file)
+        .map_err(|error| FirmwareError::new(format!("cannot fully sync file: {error}")))?;
+    let after = symlink_metadata(path)
+        .map_err(|error| FirmwareError::new(format!("cannot recheck synced file: {error}")))?;
+    if !regular_size(&after, expected) || !same_file(&opened, &after) {
+        return Err(FirmwareError::new("file changed during sync"));
+    }
+    Ok(())
 }

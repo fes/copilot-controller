@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::FirmwareError;
 use super::artifacts::{ArtifactPin, read_exact_regular, sha256, sync_regular, verify_artifact};
+use super::backend::MaintenanceBackend;
 
 #[cfg(unix)]
 fn same_file(left: &Metadata, right: &Metadata) -> bool {
@@ -69,6 +70,8 @@ pub(crate) struct Workspace {
     #[cfg(unix)]
     directory: File,
     #[cfg(unix)]
+    parent: File,
+    #[cfg(unix)]
     tool_tmp: Option<File>,
 }
 
@@ -93,10 +96,18 @@ impl Workspace {
         #[cfg(unix)]
         let directory = File::open(&root)
             .map_err(|error| FirmwareError::new(format!("cannot open workspace: {error}")))?;
+        #[cfg(unix)]
+        let parent = File::open(
+            root.parent()
+                .ok_or_else(|| FirmwareError::new("workspace has no parent"))?,
+        )
+        .map_err(|error| FirmwareError::new(format!("cannot open workspace parent: {error}")))?;
         let workspace = Self {
             root,
             #[cfg(unix)]
             directory,
+            #[cfg(unix)]
+            parent,
             #[cfg(unix)]
             tool_tmp: None,
         };
@@ -140,6 +151,21 @@ impl Workspace {
             })?;
             if !same_file(&current, &opened) {
                 return Err(FirmwareError::new("workspace directory was substituted"));
+            }
+            let parent_path = self
+                .root
+                .parent()
+                .ok_or_else(|| FirmwareError::new("workspace has no parent"))?;
+            let parent_path_metadata = fs::symlink_metadata(parent_path).map_err(|error| {
+                FirmwareError::new(format!("cannot inspect workspace parent: {error}"))
+            })?;
+            let parent_opened = self.parent.metadata().map_err(|error| {
+                FirmwareError::new(format!("cannot inspect workspace parent handle: {error}"))
+            })?;
+            if !parent_path_metadata.file_type().is_dir()
+                || !same_file(&parent_path_metadata, &parent_opened)
+            {
+                return Err(FirmwareError::new("workspace parent was substituted"));
             }
         }
         Ok(())
@@ -248,17 +274,33 @@ impl Workspace {
         Ok(bytes)
     }
 
-    pub(crate) fn persist_backup(&self, backup: &[u8]) -> Result<String, FirmwareError> {
+    pub(crate) fn persist_backup<B: MaintenanceBackend>(
+        &self,
+        backend: &mut B,
+        backup: &[u8],
+    ) -> Result<String, FirmwareError> {
         let checksum = format!("{}  full-flash.bin\n", sha256(backup));
         self.create_file("SHA256SUMS", checksum.as_bytes(), 0o600)?;
         let path = self.private_file("full-flash.bin", 0o600)?;
-        sync_regular(&path, backup.len() as u64)?;
+        sync_regular(backend, &path, backup.len() as u64)?;
+        let checksum_path = self.private_file("SHA256SUMS", 0o600)?;
+        sync_regular(backend, &checksum_path, checksum.len() as u64)?;
         #[cfg(unix)]
-        self.directory
-            .sync_all()
-            .map_err(|error| FirmwareError::new(format!("cannot sync workspace: {error}")))?;
-        self.check()?;
-        Ok(checksum)
+        {
+            backend.full_sync(&self.directory).map_err(|error| {
+                FirmwareError::new(format!("cannot fully sync workspace: {error}"))
+            })?;
+            backend.full_sync(&self.parent).map_err(|error| {
+                FirmwareError::new(format!("cannot fully sync workspace parent: {error}"))
+            })?;
+        }
+        #[cfg(not(unix))]
+        return Err(FirmwareError::new("directory durability is unsupported"));
+        #[cfg(unix)]
+        {
+            self.check()?;
+            Ok(checksum)
+        }
     }
 
     pub(crate) fn verify_backup_evidence(

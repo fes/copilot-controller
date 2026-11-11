@@ -15,6 +15,7 @@ use super::identity::{
 };
 use super::options::{UpdateOptions, validate_options};
 use super::report::{UpdateOutcome, UpdatePhase, UpdateReport};
+pub(crate) use super::worker::run_maintenance_worker;
 use super::workspace::Workspace;
 
 const OUTPUT_LIMIT: usize = 4_194_304;
@@ -31,29 +32,7 @@ fn backend_error(error: impl std::fmt::Display) -> FirmwareError {
     FirmwareError::new(error.to_string())
 }
 
-/// The real worker is intentionally unavailable until its native binding and
-/// process-group supervisor have been implemented and independently reviewed.
-pub fn run_maintenance_worker(options: &UpdateOptions) -> UpdateOutcome {
-    let mut report = UpdateReport::default();
-    if let Err(error) = validate_options(options) {
-        return UpdateOutcome::failed(report, error.to_string());
-    }
-    report.phase = UpdatePhase::Preflight;
-    let reason = if !cfg!(feature = "micro-firmware") {
-        "maintenance requires the micro-firmware feature"
-    } else if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "native maintenance is available only on macOS ARM64"
-    } else {
-        "native maintenance transport, safe-root binding, and supervisor are pending"
-    };
-    UpdateOutcome::failed(report, reason)
-}
-
-/// Run the transaction model with an injected backend and immutable production pins.
-///
-/// This is not a native worker or supervisor. Supplying a fake backend cannot
-/// qualify a device; the public worker remains unavailable.
-pub fn run_transaction_model<B: MaintenanceBackend>(
+pub(crate) fn run_transaction_model<B: MaintenanceBackend>(
     options: &UpdateOptions,
     backend: &mut B,
 ) -> UpdateOutcome {
@@ -449,7 +428,7 @@ fn run_in_workspace<B: MaintenanceBackend>(
 
     runner.report.phase = UpdatePhase::QualifyingUsbTarget;
     let location = require_application(runner.backend)?;
-    open_qualified(runner.backend, hid_open, pins.descriptors)?;
+    open_qualified(runner.backend, hid_open, pins.descriptors, location)?;
     let version = query_version(runner.backend)?;
     if !matches!(version.as_str(), "v0.1.50" | "0.6.3") {
         return Err(FirmwareError::new(format!(
@@ -506,7 +485,7 @@ fn run_in_workspace<B: MaintenanceBackend>(
 
     runner.report.phase = UpdatePhase::PersistingBackup;
     runner.backend.check_cancelled().map_err(backend_error)?;
-    let checksum = workspace.persist_backup(&backup)?;
+    let checksum = workspace.persist_backup(runner.backend, &backup)?;
 
     runner.report.phase = UpdatePhase::VerifyingBackup;
     let _ = runner.call(ToolOperation::VerifyBackup)?;
@@ -537,7 +516,7 @@ fn run_in_workspace<B: MaintenanceBackend>(
     let _ = runner.call_with_backup(ToolOperation::Reset, Some((&backup, &checksum)))?;
     runner.report.phase = UpdatePhase::VerifyingRunningFirmware;
     wait_for_application(runner.backend, location)?;
-    open_qualified(runner.backend, hid_open, pins.descriptors)?;
+    open_qualified(runner.backend, hid_open, pins.descriptors, location)?;
     let final_version = query_version(runner.backend)?;
     runner.report.running_version = Some(final_version.clone());
     if final_version != "0.6.3" {
