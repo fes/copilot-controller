@@ -209,3 +209,26 @@ fn native_backend_unavailable_on_linux_with_feature() {
         ))
     ));
 }
+
+#[test]
+fn unsupervised_write_fails_closed_before_any_io() {
+    let d = desc(ID, 1, "a");
+    let b = FakeBackend::new(vec![d.clone()]);
+    b.state.borrow_mut().writes_unsupported = true;
+    let mut dev = HidDevice::open(&b, &d).unwrap();
+    assert_eq!(
+        dev.write_report(&[0, 1]),
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
+    );
+    assert!(b.state.borrow().written.is_empty());
+    // Argument errors still take precedence, and reads are unaffected.
+    assert!(matches!(
+        dev.write_report(&[]),
+        Err(HidError::InvalidArgument(_))
+    ));
+    b.state.borrow_mut().inputs.push_back(vec![1]);
+    assert_eq!(
+        dev.read_report(4, Duration::from_millis(1)).unwrap(),
+        vec![1]
+    );
+}

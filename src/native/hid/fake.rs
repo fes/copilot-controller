@@ -15,6 +15,7 @@ pub struct FakeState {
     pub write_count: Option<usize>,
     /// Count reported back from `read`, overriding the true length.
     pub read_count: Option<usize>,
+    pub writes_unsupported: bool,
 }
 
 pub struct FakeBackend {
@@ -56,6 +57,10 @@ impl HidBackend for FakeBackend {
 struct FakeTransport(Rc<RefCell<FakeState>>);
 
 impl HidTransport for FakeTransport {
+    fn supports_write(&self) -> bool {
+        !self.0.borrow().writes_unsupported
+    }
+
     fn write(&mut self, report: &[u8]) -> Result<usize, HidError> {
         let mut s = self.0.borrow_mut();
         s.written.push(report.to_vec());

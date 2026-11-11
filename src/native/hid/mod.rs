@@ -7,10 +7,12 @@
 //! # Deadlines
 //! Platform HID calls are synchronous. Report reads accept a timeout that the
 //! native backends attempt to honor (overlapped I/O on Windows, run-loop timeout
-//! on macOS), but writes carry no caller deadline and the behavior has not been
-//! validated against hardware. Callers must run any live use inside a disposable,
-//! supervised worker process that can be killed; this module does not provide a
-//! bounded live probe.
+//! on macOS), but the behavior has not been validated against hardware. Windows
+//! writes use a fixed best-effort deadline. macOS writes are unavailable (typed
+//! `UnsupervisedWrite`) because `IOHIDDeviceSetReport` can block indefinitely and no
+//! supervised worker exists there. Callers must run any live use inside a
+//! disposable, supervised worker process that can be killed; this module does not
+//! provide a bounded live probe.
 //!
 //! A successful transport call is not device qualification or action readiness.
 
@@ -117,6 +119,8 @@ pub enum UnavailableReason {
     /// Neither `akp03-hid` nor `micro-hid` was compiled in.
     FeatureDisabled,
     UnsupportedPlatform,
+    /// The backend cannot bound writes and no supervised worker exists for it.
+    UnsupervisedWrite,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,6 +181,10 @@ pub trait HidBackend {
 /// Raw report I/O. Implementations may assume arguments were bounds-checked by
 /// [`HidDevice`], the only way callers reach them.
 pub trait HidTransport {
+    /// Whether this transport may write at all; `false` fails closed before any I/O.
+    fn supports_write(&self) -> bool {
+        true
+    }
     fn write(&mut self, report: &[u8]) -> Result<usize, HidError>;
     /// Reads one input report into `buf`, returning its length.
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, HidError>;
@@ -224,6 +232,9 @@ impl HidDevice {
             return Err(HidError::InvalidArgument(
                 ArgumentError::ReportExceedsDevice,
             ));
+        }
+        if !self.transport.supports_write() {
+            return Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite));
         }
         let n = self.transport.write(report)?;
         if n > report.len() {

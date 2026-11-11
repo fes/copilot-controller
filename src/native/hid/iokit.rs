@@ -2,8 +2,9 @@
 //! All raw FFI is private to this file. Not validated against hardware.
 //!
 //! Input reports are delivered through a run-loop callback on the thread that
-//! opened the device (the transport is therefore `!Send`). `IOHIDDeviceSetReport`
-//! is synchronous and offers no caller deadline.
+//! opened the device (the transport is therefore `!Send`). Writes are deliberately
+//! unavailable: `IOHIDDeviceSetReport` is synchronous with no caller deadline and
+//! no supervised worker exists on macOS, so no write FFI is declared here.
 
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_void};
@@ -18,7 +19,6 @@ type IOReturn = i32;
 
 const UTF8: u32 = 0x0800_0100;
 const SINT32: CFIndex = 3;
-const REPORT_OUTPUT: u32 = 1;
 const MAX_QUEUED: usize = 64;
 const MAX_SCAN: CFIndex = 4096;
 
@@ -62,13 +62,6 @@ unsafe extern "C" {
     fn IOHIDDeviceGetService(d: CFTypeRef) -> u32;
     fn IOHIDDeviceOpen(d: CFTypeRef, options: u32) -> IOReturn;
     fn IOHIDDeviceClose(d: CFTypeRef, options: u32) -> IOReturn;
-    fn IOHIDDeviceSetReport(
-        d: CFTypeRef,
-        ty: u32,
-        id: CFIndex,
-        report: *const u8,
-        len: CFIndex,
-    ) -> IOReturn;
     fn IOHIDDeviceRegisterInputReportCallback(
         d: CFTypeRef,
         report: *mut u8,
@@ -373,27 +366,12 @@ impl Drop for MacTransport {
 }
 
 impl HidTransport for MacTransport {
-    fn write(&mut self, report: &[u8]) -> Result<usize, HidError> {
-        let id = report[0];
-        // Unnumbered reports (ID 0) are sent without the leading zero byte.
-        let data = if id == 0 { &report[1..] } else { report };
-        // SAFETY: pointer/length describe `data`.
-        let r = unsafe {
-            IOHIDDeviceSetReport(
-                self.dev.0,
-                REPORT_OUTPUT,
-                CFIndex::from(id),
-                data.as_ptr(),
-                data.len() as CFIndex,
-            )
-        };
-        if r != 0 {
-            return Err(HidError::Os {
-                op: HidOp::Write,
-                code: i64::from(r),
-            });
-        }
-        Ok(report.len())
+    fn supports_write(&self) -> bool {
+        false
+    }
+
+    fn write(&mut self, _report: &[u8]) -> Result<usize, HidError> {
+        Err(HidError::Unavailable(UnavailableReason::UnsupervisedWrite))
     }
 
     fn read(&mut self, out: &mut [u8], timeout: Duration) -> Result<usize, HidError> {
