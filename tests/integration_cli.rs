@@ -42,9 +42,11 @@ fn inventory_and_doctor_are_truthful_and_never_action_ready() {
     let capabilities = json_result(&["capabilities"]);
     assert_eq!(capabilities["hardware_backend_available"], false);
     assert_eq!(capabilities["firmware_execution_available"], false);
+    assert_eq!(capabilities["runtime_owner_acquired"], false);
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     assert_eq!(
         capabilities["inventory"]["platform"]["cooperative_runtime_ownership"]["status"],
-        "unavailable"
+        "compiled"
     );
     assert_eq!(
         capabilities["inventory"]["hosts"]["integrated"]["authentication"]["status"],
@@ -243,7 +245,7 @@ fn micro_replay_preserves_surrogates_and_handles_deep_json_without_recursive_clo
     assert!(!text.contains("\u{fdd0}sd800\u{fdd0}"));
     assert!(text.contains("\u{fdd0}sd800"));
 
-    let raw = format!("{{\"deep\":{}0{}}}", "[".repeat(1_000), "]".repeat(1_000));
+    let raw = format!("{{\"deep\":{}0{}}}", "[".repeat(100), "]".repeat(100));
     let reports: Vec<_> = raw
         .as_bytes()
         .chunks(61)
@@ -261,6 +263,28 @@ fn micro_replay_preserves_surrogates_and_handles_deep_json_without_recursive_clo
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("\"incomplete_bytes\": 0"));
     assert!(text.contains("\"deep\": ["));
+
+    let raw = format!("{{\"deep\":{}0{}}}", "[".repeat(256), "]".repeat(256));
+    let reports: Vec<_> = raw
+        .as_bytes()
+        .chunks(61)
+        .map(|chunk| {
+            let mut report = [0u8; 64];
+            report[..3].copy_from_slice(&[6, 2, chunk.len() as u8]);
+            report[3..3 + chunk.len()].copy_from_slice(chunk);
+            hex(&report)
+        })
+        .collect();
+    let mut args = vec!["micro-decode"];
+    args.extend(reports.iter().map(String::as_str));
+    let output = invoke(&args);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("depth limit")
+    );
 }
 fn assignment() -> Value {
     let epoch = RuntimeEpoch::parse_str("11111111-1111-4111-8111-111111111111").unwrap();

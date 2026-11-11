@@ -93,6 +93,12 @@ jobs:
           cargo +1.99.1 test --locked --all-targets --all-features
           cargo +1.99.1 test --locked --doc --all-features
 
+      - name: Test approved native persistence roots (Unix only)
+        if: runner.os != 'Windows'
+        run: |
+          umask 077
+          cargo +1.99.1 test --locked --lib --all-features persistence:: -- --include-ignored
+
       - name: Check formatting
         run: cargo +1.99.1 fmt --all -- --check
 

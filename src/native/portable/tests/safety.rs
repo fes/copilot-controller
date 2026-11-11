@@ -54,10 +54,17 @@ fn compile_time_inventory_never_claims_unintegrated_or_qualified_features() {
             Support::Unavailable { .. }
         ));
     }
-    assert!(matches!(
-        inventory.platform().cooperative_runtime_ownership,
-        Support::Unavailable { .. }
-    ));
+    if cfg!(any(windows, target_os = "linux", target_os = "macos")) {
+        assert!(matches!(
+            inventory.platform().cooperative_runtime_ownership,
+            Support::Compiled { .. }
+        ));
+    } else {
+        assert!(matches!(
+            inventory.platform().cooperative_runtime_ownership,
+            Support::Unavailable { .. }
+        ));
+    }
     assert!(matches!(
         inventory.platform().lifecycle_notifications,
         Support::Unavailable { .. }

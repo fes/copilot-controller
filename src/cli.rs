@@ -344,6 +344,8 @@ fn capabilities() -> Value {
         "offline_codecs": ["micro", "akp03-original", "akp03e-rev2", "ct-pid-0003"],
         "hardware_backend_available": false,
         "firmware_execution_available": false,
+        "runtime_owner_acquired": false,
+        "state_store_api_available": cfg!(any(target_os = "linux", target_os = "macos")),
         "firmware_offline_validation_available": cfg!(feature = "micro-firmware"),
         "build_features": {
             "akp03_hid": cfg!(feature = "akp03-hid"),
@@ -435,7 +437,8 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
                 "inventory": portable_inventory(),
                 "limitations": ["No device discovery/opening, worker launch, provider calls or terminal actions.",
                     "Windows basename hints use copilot.exe and WindowsTerminal.exe; they are not authenticated host identities.",
-                    "Hardware backends, host authentication, lifecycle subscriptions and physical acceptance are unavailable."],
+                    "Hardware backends, host authentication, lifecycle subscriptions and physical acceptance are unavailable.",
+                    "State/recovery and shared-owner APIs are library-only; this command acquires no owner lease."],
             })))
         }
         Command::DeviceDoctor { device, discover } => {

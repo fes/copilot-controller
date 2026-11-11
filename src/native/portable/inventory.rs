@@ -170,7 +170,13 @@ pub fn portable_inventory() -> CapabilityInventory {
         } else {
             unavailable("namespace_mutation_durability_unsupported")
         },
-        cooperative_runtime_ownership: unavailable("shared_authority_anchor_lease_not_integrated"),
+        cooperative_runtime_ownership: if supported_os {
+            Support::Compiled {
+                prerequisite: "explicit_existing_empty_shared_authority_anchor_library_api_only",
+            }
+        } else {
+            unavailable("unsupported_platform")
+        },
         bounded_diagnostic_children: children,
         durable_action_writer_quiescence: unavailable("action_writer_quiescence_unimplemented"),
         process_window_desktop_serial_observations: windows_observations,

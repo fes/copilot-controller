@@ -143,6 +143,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires explicitly approved native root and anchor initialization"]
     fn one_authority_anchor_excludes_other_config_roots_without_takeover() {
         let fixture = Fixture::new();
         let root = PrivateRoot::open(&fixture.0).unwrap();
@@ -169,6 +170,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires explicitly approved native root and anchor initialization"]
     fn process_death_releases_lock_without_takeover() {
         const CHILD_PATH: &str = "COPILOT_CONTROLLER_OWNER_LOCK_CHILD";
         if let Some(path) = std::env::var_os(CHILD_PATH) {
@@ -190,6 +192,7 @@ mod tests {
             .args([
                 "--exact",
                 "persistence::ownership::tests::process_death_releases_lock_without_takeover",
+                "--include-ignored",
                 "--nocapture",
             ])
             .env(CHILD_PATH, &fixture.0)

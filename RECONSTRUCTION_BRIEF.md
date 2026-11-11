@@ -136,10 +136,13 @@ The integration package currently routes offline inventories, synthetic previews
 bounded recorded assignments, decoders, and pinned local firmware-plan validation.
 `doctor` samples the native clock and available read-only process/desktop
 observations; serial/device discovery is deliberately unavailable. Contained
-health workers are Windows-only. No hardware transports, native updater, shared
-authority-anchor lease, or transactional snapshot/recovery store is wired.
+health workers are Windows-only. State snapshots/recovery and shared
+authority-anchor ownership are explicit library-only APIs; no CLI route invokes
+them. No hardware transports or native updater are wired.
 Windows namespace mutations remain explicitly unavailable. Compiled codecs and
 test-only maintenance models are not runtime or physical acceptance.
+Native persistence acceptance tests require an explicitly approved filesystem
+and are ignored by default; Unix CI executes them on its approved roots.
 
 ## 4. Common types and time rules
 
