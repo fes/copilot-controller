@@ -298,10 +298,24 @@ fn validate_profile(profile: &DeviceProfile) -> Result<(), RealizationError> {
     }
 }
 
-fn screen_output_qualified(profile: &DeviceProfile, scope: &EvidenceScope) -> bool {
-    profile
-        .feature(PresentationFeature::Steady)
-        .is_some_and(|evidence| evidence.check(scope, EvidenceUse::VisibleOutput).is_ok())
+fn screen_output_qualified(
+    profile: &DeviceProfile,
+    scope: &EvidenceScope,
+    semantic: SemanticSlot,
+) -> bool {
+    let qualified = |feature| {
+        profile
+            .feature(feature)
+            .is_some_and(|evidence| evidence.check(scope, EvidenceUse::VisibleOutput).is_ok())
+    };
+    qualified(PresentationFeature::Steady)
+        && qualified(PresentationFeature::Color)
+        && qualified(PresentationFeature::Words)
+        && (semantic.selection == Selection::None
+            || qualified(PresentationFeature::SelectionFrames))
+        && (profile.device != DeviceKind::Ajazz
+            || semantic.token.style().glyph.is_none()
+            || qualified(PresentationFeature::StatusIcons))
 }
 
 fn led_entry(
@@ -349,7 +363,6 @@ fn realize_inner(
     if !profile.matches_scope(scope) {
         return Err(RealizationError::ProfileScopeMismatch);
     }
-    let qualified_screen = !synthetic && screen_output_qualified(profile, scope);
     let resolved = resolve(snapshot, now);
     let slots = resolved.map(|semantic| {
         let qualifications = if synthetic { &[][..] } else { qualifications };
@@ -399,7 +412,8 @@ fn realize_inner(
                 if semantic.selection != Selection::None {
                     push_once(&mut fallbacks, Fallback::SelectionFrameUnsupported);
                 }
-                if semantic.selection == Selection::Confirmed && effective == 0.0 {
+                let selection_visible = effective > 0.0 && style.rgb != [0, 0, 0];
+                if semantic.selection == Selection::Confirmed && !selection_visible {
                     push_once(&mut fallbacks, Fallback::SelectionContrastNotVisible);
                 }
                 if semantic.selection == Selection::Pending {
@@ -412,7 +426,7 @@ fn realize_inner(
                     push_once(&mut fallbacks, Fallback::HighContrastNotApplied);
                 }
                 if effect.mode == EffectMode::StaticEmphasis
-                    && (semantic.selection != Selection::Confirmed || effective == 0.0)
+                    && (semantic.selection != Selection::Confirmed || !selection_visible)
                 {
                     effect.mode = EffectMode::Steady;
                     push_once(&mut fallbacks, Fallback::StaticEmphasisNotApplied);
@@ -429,7 +443,7 @@ fn realize_inner(
                     push_once(&mut fallbacks, Fallback::WordsRequired);
                 }
                 push_once(&mut fallbacks, Fallback::BrightnessNotApplied);
-                if !qualified_screen {
+                if synthetic || !screen_output_qualified(profile, scope, semantic) {
                     push_once(&mut fallbacks, Fallback::OutputUnqualified);
                 }
                 if profile.device == DeviceKind::Ajazz {

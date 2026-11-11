@@ -182,6 +182,110 @@ fn v03_demo_is_six_synthetic_slots_and_never_qualified() {
 }
 
 #[test]
+fn screen_output_requires_exact_evidence_for_each_rendered_feature() {
+    for mut profile in [profiles::ajazz_rev2(), profiles::ct()] {
+        let scope = complete_scope(&profile);
+        let mut source = snapshot();
+        source.slots[0].selection = Selection::Confirmed;
+        for feature in &mut profile.features {
+            feature.evidence = assertion(&scope, EvidenceLabel::PhysicallyAccepted);
+        }
+        let render = |profile: &profiles::DeviceProfile| {
+            realize(
+                &source,
+                sample(0),
+                profile,
+                &scope,
+                Preferences::default(),
+                &[],
+            )
+            .unwrap()
+        };
+        assert!(
+            render(&profile)
+                .slots()
+                .iter()
+                .all(|slot| !slot.fallbacks.contains(&Fallback::OutputUnqualified))
+        );
+        for feature in [
+            PresentationFeature::Steady,
+            PresentationFeature::Color,
+            PresentationFeature::Words,
+            PresentationFeature::SelectionFrames,
+            PresentationFeature::StatusIcons,
+        ] {
+            for variant in 0..3 {
+                let mut missing = profile.clone();
+                let item = missing
+                    .features
+                    .iter_mut()
+                    .find(|item| item.feature == feature)
+                    .unwrap();
+                match variant {
+                    0 => item.evidence.label = EvidenceLabel::NativeObserved,
+                    1 => item.evidence.scope.firmware = Some("different".into()),
+                    _ => item.evidence.observation_ref = None,
+                }
+                let view = render(&missing);
+                let required = feature != PresentationFeature::StatusIcons
+                    || profile.device == crate::presentation::evidence::DeviceKind::Ajazz;
+                assert_eq!(
+                    view.slots()[0]
+                        .fallbacks
+                        .contains(&Fallback::OutputUnqualified),
+                    required,
+                    "{:?} {feature:?} variant {variant}",
+                    profile.device
+                );
+                if feature == PresentationFeature::SelectionFrames {
+                    assert!(
+                        !view.slots()[1]
+                            .fallbacks
+                            .contains(&Fallback::OutputUnqualified)
+                    );
+                }
+            }
+        }
+        profile
+            .features
+            .retain(|item| item.feature == PresentationFeature::Steady);
+        assert!(
+            render(&profile).slots()[0]
+                .fallbacks
+                .contains(&Fallback::OutputUnqualified)
+        );
+    }
+}
+
+#[test]
+fn confirmed_off_led_cannot_show_brightness_contrast_or_static_emphasis() {
+    let profile = profiles::micro();
+    let scope = complete_scope(&profile);
+    let mut source = snapshot();
+    source.slots[0].status = Status::Off;
+    source.slots[0].selection = Selection::Confirmed;
+    let qualification = qualification(&scope, PresentationFeature::Steady, Token::Off);
+    let view = realize(
+        &source,
+        sample(0),
+        &profile,
+        &scope,
+        Preferences::default(),
+        &[qualification],
+    )
+    .unwrap();
+    let slot = &view.slots()[0];
+    assert_eq!(slot.led_entry.unwrap().c, 0);
+    assert_eq!(slot.effective_brightness, Some(0.25));
+    assert!(
+        slot.fallbacks
+            .contains(&Fallback::SelectionContrastNotVisible)
+    );
+    assert!(slot.fallbacks.contains(&Fallback::StaticEmphasisNotApplied));
+    assert_eq!(slot.effect.mode, EffectMode::Steady);
+}
+
+#[test]
 fn v03_micro_reports_all_unrepresentable_channels_without_duplicates() {
     let profile = profiles::micro();
     let mut source = snapshot();

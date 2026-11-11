@@ -328,6 +328,98 @@ fn i01_clock_and_generation_cuts_discard_holds_without_bypassing_debounce() {
 }
 
 #[test]
+fn clock_taint_blocks_turns_until_reset_or_matched_clean_release() {
+    let (profile, scope) = input_profile(profiles::ajazz_rev2());
+    let bindings = [
+        selected("button_0", 1),
+        binding("encoder_1_turn", Intent::MoveCursor),
+    ];
+    for reset in [false, true] {
+        let mut tracker = GestureTracker::new(7, epoch()).unwrap();
+        let mut bad = event("encoder_1_turn", PhysicalEventKind::Turn(1), 0);
+        bad.at.stamp.frequency = 0;
+        assert_eq!(
+            tracker.observe(&profile, &scope, &bindings, &bad),
+            Err(RefusalReason::ClockMismatch)
+        );
+        assert_eq!(
+            tracker.observe(
+                &profile,
+                &scope,
+                &bindings,
+                &event("encoder_1_turn", PhysicalEventKind::Turn(1), 1)
+            ),
+            Ok(None)
+        );
+        if reset {
+            tracker.reset(7, epoch()).unwrap();
+        } else {
+            assert_eq!(
+                tracker.observe(
+                    &profile,
+                    &scope,
+                    &bindings,
+                    &event("button_0", PhysicalEventKind::Release, 2)
+                ),
+                Ok(None)
+            );
+            assert_eq!(
+                tracker.observe(
+                    &profile,
+                    &scope,
+                    &bindings,
+                    &event("encoder_1_turn", PhysicalEventKind::Turn(1), 3)
+                ),
+                Ok(None)
+            );
+            assert_eq!(
+                tracker.observe(
+                    &profile,
+                    &scope,
+                    &bindings,
+                    &event("button_0", PhysicalEventKind::Press, 4)
+                ),
+                Ok(None)
+            );
+            let mut bad_release = event("button_0", PhysicalEventKind::Release, 5);
+            bad_release.at.stamp.frequency = 0;
+            assert_eq!(
+                tracker.observe(&profile, &scope, &bindings, &bad_release),
+                Err(RefusalReason::ClockMismatch)
+            );
+            assert_eq!(
+                tracker.observe(
+                    &profile,
+                    &scope,
+                    &bindings,
+                    &event("encoder_1_turn", PhysicalEventKind::Turn(1), 6)
+                ),
+                Ok(None)
+            );
+            assert_eq!(
+                tracker.observe(
+                    &profile,
+                    &scope,
+                    &bindings,
+                    &event("button_0", PhysicalEventKind::Release, 7)
+                ),
+                Ok(None)
+            );
+        }
+        let turn = tracker
+            .observe(
+                &profile,
+                &scope,
+                &bindings,
+                &event("encoder_1_turn", PhysicalEventKind::Turn(-1), 8),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!((turn.intent, turn.delta), (Intent::MoveCursor, -1));
+    }
+}
+
+#[test]
 fn i01_unit_turns_kind_checks_and_turn_during_hold() {
     let (profile, scope) = input_profile(profiles::ajazz_rev2());
     let bindings = [

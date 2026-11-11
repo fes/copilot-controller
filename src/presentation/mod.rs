@@ -21,6 +21,9 @@
 //! only a boolean with its own 400 ms interval. A tracker requires explicit
 //! reset after disconnect, mode/clock cut, or held-control overflow. Neither a
 //! demo nor an offline assignment can establish qualification or command readiness.
+//! Screen output requires exact-scope physical evidence for each rendered feature.
+//! A clock-invalid release does not clear a tainted gesture; a valid matched
+//! release or explicit reset is required before turns can be admitted again.
 
 pub mod artwork;
 pub mod assignment;

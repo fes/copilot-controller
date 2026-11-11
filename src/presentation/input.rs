@@ -332,7 +332,12 @@ impl GestureTracker {
                 .last_sample
                 .is_some_and(|earlier| event.at.elapsed_since(earlier).is_err())
         {
-            self.record_tainted_event(event);
+            if event.kind == PhysicalEventKind::Release {
+                self.tainted = true;
+                self.candidate = None;
+            } else {
+                self.record_tainted_event(event);
+            }
             return Err(RefusalReason::ClockMismatch);
         }
         self.last_sample = Some(event.at);
@@ -410,6 +415,9 @@ impl GestureTracker {
                 if !self.held.is_empty() {
                     self.tainted = true;
                     self.candidate = None;
+                    return Ok(None);
+                }
+                if self.tainted {
                     return Ok(None);
                 }
                 if !matches!(delta, -1 | 1) {
