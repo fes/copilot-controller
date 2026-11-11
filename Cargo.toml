@@ -15,7 +15,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Compatibility build flags only: no native HID or updater backend is included.
+# HID features enable the explicit-opt-in native HID backend (Windows x64/ARM64,
+# macOS ARM64); other targets report typed unavailability. No updater backend.
 akp03-hid = []
 micro-hid = []
 micro-firmware = []
@@ -52,6 +53,7 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation", "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
     "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Com",
     "Win32_System_Diagnostics_ToolHelp", "Win32_System_Performance",
