@@ -10,8 +10,9 @@
 //! on macOS), but the behavior has not been validated against hardware. Windows
 //! writes use a fixed best-effort deadline. All macOS IOKit access requires a
 //! private capability issued only inside the verified supervised worker.
-//! `IOHIDDeviceSetReport` can block indefinitely; only the parent worker deadline
-//! bounds its lifetime, not an individual write timeout. Callers must run any live use inside a
+//! `IOHIDDeviceSetReport` can block indefinitely; the parent deadline and child
+//! watchdog bound the worker lifetime on a responsive OS, not an individual
+//! write timeout. Callers must run any live use inside a
 //! disposable, supervised worker process that can be killed; this module does not
 //! provide a bounded live probe.
 //!

@@ -386,7 +386,7 @@ fn capabilities() -> Value {
             "micro_firmware": cfg!(feature = "micro-firmware"),
         },
         "limitations": ["Availability is compile-time support, not native evidence or hardware acceptance. Native CLI probing requires explicit opt-in and a contained Windows or macOS ARM64 worker; CT remains Windows-only.",
-            "Micro/AKP03 live probes fail closed without device-specific features and exact native descriptor evidence. Windows HID evidence is unavailable. macOS process groups have no parent-death or escape guarantee; IOKit access requires a private child capability and same-executable parent.",
+            "Micro/AKP03 live probes fail closed without device-specific features and exact native descriptor evidence. Windows HID evidence is unavailable. macOS has a child-side parent-lifetime watchdog, not kernel-enforced parent-death/escape containment; IOKit requires a private child capability and canonical same-executable parent.",
             "Micro/AKP03 health checks perform no device access and do not require HID features."],
     })
 }

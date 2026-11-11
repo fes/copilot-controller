@@ -7,13 +7,17 @@ use std::{
         process::CommandExt,
     },
     process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 #[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
-use std::{marker::PhantomData, os::unix::ffi::OsStrExt, rc::Rc};
+use std::{ffi::OsStr, marker::PhantomData, os::unix::ffi::OsStrExt, path::Path, rc::Rc};
 
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -29,11 +33,15 @@ use super::{
 };
 
 const POLL: Duration = Duration::from_millis(5);
+const WATCHDOG_POLL: Duration = Duration::from_millis(50);
+const WATCHDOG_START: Duration = Duration::from_secs(1);
+const WATCHDOG_STOP: Duration = Duration::from_millis(250);
 static SUPERVISOR: SupervisorGate = SupervisorGate::new();
 
 thread_local! {
     // Set only while the fully validated hidden request's callback is running.
     static WORKER_SCOPE: Cell<Option<(bool, Uuid)>> = const { Cell::new(None) };
+    static WATCHDOG_PARENT: Cell<Option<WorkerIdentity>> = const { Cell::new(None) };
 }
 
 struct WorkerScope;
@@ -41,6 +49,10 @@ struct WorkerScope;
 impl WorkerScope {
     fn enter(live_hid: bool) -> Result<Self, Kind> {
         verify_containment()?;
+        let parent = WATCHDOG_PARENT.with(Cell::get).ok_or(Kind::Containment)?;
+        if !parent_alive(parent) {
+            return Err(Kind::Containment);
+        }
         WORKER_SCOPE.with(|scope| {
             if scope.get().is_some() {
                 return Err(Kind::Containment);
@@ -63,6 +75,7 @@ impl Drop for WorkerScope {
 pub(crate) struct HidWorkerCapability {
     pid: libc::pid_t,
     scope_nonce: Uuid,
+    parent: WorkerIdentity,
     _thread_bound: PhantomData<Rc<()>>,
 }
 
@@ -72,6 +85,8 @@ impl HidWorkerCapability {
         WORKER_SCOPE.with(|scope| scope.get() == Some((true, self.scope_nonce)))
             && unsafe { libc::getpid() } == self.pid
             && verify_containment().is_ok()
+            && WATCHDOG_PARENT.with(Cell::get) == Some(self.parent)
+            && parent_alive(self.parent)
             && verify_supervisor_parent().is_ok()
     }
 }
@@ -79,24 +94,35 @@ impl HidWorkerCapability {
 #[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
 pub(crate) fn hid_worker_capability() -> Option<HidWorkerCapability> {
     let (live_hid, scope_nonce) = WORKER_SCOPE.with(Cell::get)?;
+    let parent = WATCHDOG_PARENT.with(Cell::get)?;
     if !live_hid || verify_containment().is_err() || verify_supervisor_parent().is_err() {
+        return None;
+    }
+    if !parent_alive(parent) {
         return None;
     }
     Some(HidWorkerCapability {
         pid: unsafe { libc::getpid() },
         scope_nonce,
+        parent,
         _thread_bound: PhantomData,
     })
 }
 
 pub(crate) fn worker_health() -> Result<Value, DiagnosticCallbackError> {
-    if !WORKER_SCOPE.with(|scope| scope.get().is_some()) || verify_containment().is_err() {
+    if !WORKER_SCOPE.with(|scope| scope.get().is_some())
+        || WATCHDOG_PARENT
+            .with(Cell::get)
+            .is_none_or(|parent| !parent_alive(parent))
+        || verify_containment().is_err()
+    {
         return Err(DiagnosticCallbackError);
     }
     Ok(json!({
         "process_group": true, "pid": std::process::id(),
         "pgid": unsafe { libc::getpgrp() },
         "parent_death_guarantee": false, "escape_guarantee": false,
+        "parent_death_watchdog": true, "parent_death_poll_ms": WATCHDOG_POLL.as_millis(),
         "read_only": true, "command_ready": false, "w2_qualified": false,
     }))
 }
@@ -148,13 +174,23 @@ fn verify_supervisor_parent() -> Result<(), Kind> {
         .position(|byte| *byte == 0)
         .ok_or(Kind::Containment)?;
     let executable = std::env::current_exe().map_err(|_| Kind::Containment)?;
-    if &path[..length] != executable.as_os_str().as_bytes() {
+    same_executable_paths(Path::new(OsStr::from_bytes(&path[..length])), &executable)
+}
+
+#[cfg(any(feature = "micro-hid", feature = "akp03-hid", test))]
+fn same_executable_paths(parent: &Path, current: &Path) -> Result<(), Kind> {
+    let parent = parent.canonicalize().map_err(|_| Kind::Containment)?;
+    let current = current.canonicalize().map_err(|_| Kind::Containment)?;
+    if parent != current {
         return Err(Kind::Containment);
     }
     Ok(())
 }
 
-fn identity(pid: libc::pid_t) -> Result<WorkerIdentity, Kind> {
+fn process_info(pid: libc::pid_t) -> Result<libc::proc_bsdinfo, Kind> {
+    if pid <= 0 {
+        return Err(Kind::Containment);
+    }
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = std::mem::size_of_val(&info) as libc::c_int;
     if unsafe {
@@ -170,9 +206,13 @@ fn identity(pid: libc::pid_t) -> Result<WorkerIdentity, Kind> {
         return Err(Kind::Containment);
     }
     let info = unsafe { info.assume_init() };
-    if info.pbi_pid != pid as u32 || info.pbi_pgid != pid as u32 {
+    if info.pbi_pid != pid as u32 {
         return Err(Kind::Containment);
     }
+    Ok(info)
+}
+
+fn process_lifetime(info: &libc::proc_bsdinfo) -> Result<WorkerIdentity, Kind> {
     let started = info
         .pbi_start_tvsec
         .checked_mul(10_000_000)
@@ -184,9 +224,124 @@ fn identity(pid: libc::pid_t) -> Result<WorkerIdentity, Kind> {
         .filter(|value| *value != 0)
         .ok_or(Kind::Containment)?;
     Ok(WorkerIdentity {
-        pid: pid as u32,
+        pid: info.pbi_pid,
         creation_time_100ns: started,
     })
+}
+
+fn identity(pid: libc::pid_t) -> Result<WorkerIdentity, Kind> {
+    let info = process_info(pid)?;
+    if info.pbi_pgid != pid as u32 {
+        return Err(Kind::Containment);
+    }
+    process_lifetime(&info)
+}
+
+fn parent_alive(parent: WorkerIdentity) -> bool {
+    if unsafe { libc::getppid() } as u32 != parent.pid {
+        return false;
+    }
+    process_info(parent.pid as libc::pid_t)
+        .is_ok_and(|info| info.pbi_status != libc::SZOMB && process_lifetime(&info) == Ok(parent))
+}
+
+fn terminate_worker_group(pid: libc::pid_t) -> ! {
+    // This live process reserves its original leader PID. No destructors, HID
+    // locks or the possibly blocked main thread are needed to terminate.
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+        libc::_exit(1);
+    }
+}
+
+struct ParentWatchdog {
+    stop: Arc<AtomicBool>,
+    limit_ms: Arc<AtomicU64>,
+    task: Option<thread::JoinHandle<()>>,
+    started: Instant,
+}
+
+impl ParentWatchdog {
+    fn start() -> Result<Self, Kind> {
+        verify_containment()?;
+        if WATCHDOG_PARENT.with(Cell::get).is_some() {
+            return Err(Kind::Containment);
+        }
+        let pid = unsafe { libc::getpid() };
+        let parent_pid = unsafe { libc::getppid() };
+        if parent_pid <= 1 {
+            return Err(Kind::Containment);
+        }
+        let parent = process_lifetime(&process_info(parent_pid)?)?;
+        if !parent_alive(parent) {
+            return Err(Kind::Containment);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let limit_ms = Arc::new(AtomicU64::new(super::MAX_TIMEOUT.as_millis() as u64));
+        let (ready, receiver) = mpsc::sync_channel(1);
+        let signal = Arc::clone(&stop);
+        let limit = Arc::clone(&limit_ms);
+        let started = Instant::now();
+        let task = thread::Builder::new()
+            .name("hid-parent-watchdog".into())
+            .spawn(move || {
+                if !parent_alive(parent) {
+                    terminate_worker_group(pid);
+                }
+                let _ = ready.try_send(());
+                while !signal.load(Ordering::Acquire) {
+                    if !parent_alive(parent)
+                        || started.elapsed().as_millis()
+                            >= u128::from(limit.load(Ordering::Acquire))
+                    {
+                        terminate_worker_group(pid);
+                    }
+                    thread::park_timeout(WATCHDOG_POLL);
+                }
+            })
+            .map_err(|_| Kind::Containment)?;
+        let watchdog = Self {
+            stop,
+            limit_ms,
+            task: Some(task),
+            started,
+        };
+        receiver
+            .recv_timeout(WATCHDOG_START)
+            .map_err(|_| Kind::Containment)?;
+        WATCHDOG_PARENT.with(|slot| slot.set(Some(parent)));
+        Ok(watchdog)
+    }
+
+    fn set_budget(&self, budget: Duration) -> Result<(), Kind> {
+        self.limit_ms
+            .store(budget.as_millis() as u64, Ordering::Release);
+        if self.started.elapsed() >= budget {
+            return Err(Kind::TimedOut);
+        }
+        if let Some(task) = &self.task {
+            task.thread().unpark();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ParentWatchdog {
+    fn drop(&mut self) {
+        WATCHDOG_PARENT.with(|slot| slot.set(None));
+        self.stop.store(true, Ordering::Release);
+        let Some(task) = self.task.take() else {
+            return;
+        };
+        task.thread().unpark();
+        let until = Instant::now() + WATCHDOG_STOP;
+        while !task.is_finished() && Instant::now() < until {
+            thread::sleep(POLL);
+        }
+        if !task.is_finished() || task.join().is_err() {
+            terminate_worker_group(unsafe { libc::getpid() });
+        }
+    }
 }
 
 fn duplicate_pipe(fd: libc::c_int) -> Result<File, Kind> {
@@ -204,12 +359,13 @@ fn duplicate_pipe(fd: libc::c_int) -> Result<File, Kind> {
 pub(super) fn worker_main(allowlist: &DiagnosticAllowlist) -> Result<(), WorkerError> {
     let run = || -> Result<(), Kind> {
         verify_containment()?;
+        let watchdog = ParentWatchdog::start()?;
         let mut stdin = duplicate_pipe(libc::STDIN_FILENO)?;
         let mut stdout = duplicate_pipe(libc::STDOUT_FILENO)?;
         let _stderr = duplicate_pipe(libc::STDERR_FILENO)?;
         let envelope: RequestEnvelope = protocol::read_frame(&mut stdin)?;
         protocol::validate_request(&envelope, allowlist)?;
-        validate_platform_request(&envelope.request)?;
+        watchdog.set_budget(validate_platform_request(&envelope.request)?)?;
         let worker = identity(unsafe { libc::getpid() })?;
         let callback = allowlist
             .find(&envelope.request.kind)

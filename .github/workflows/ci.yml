@@ -108,6 +108,14 @@ jobs:
           cargo +1.99.1 build --locked --all-features --example macos_worker_fixture
           cargo +1.99.1 test --locked --all-features --lib native::windows_worker -- --include-ignored
 
+      - name: Test macOS HID inventory feature matrix (no hardware)
+        if: runner.os == 'macOS'
+        run: |
+          cargo +1.99.1 test --locked --lib native::portable::tests::safety
+          cargo +1.99.1 test --locked --features micro-hid --lib native::portable::tests::safety
+          cargo +1.99.1 test --locked --features akp03-hid --lib native::portable::tests::safety
+          cargo +1.99.1 test --locked --features micro-hid,akp03-hid --lib native::portable::tests::safety
+
       - name: Check formatting
         run: cargo +1.99.1 fmt --all -- --check
 

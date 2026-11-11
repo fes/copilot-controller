@@ -734,7 +734,9 @@ reports. macOS ARM64 now uses the same-executable bounded process-group worker;
 all IOKit access and writes require its private scoped capability and a
 same-executable parent. No ordinary in-process native access or live fallback
 exists. Exact native property/descriptor evidence remains required and unverified
-on hardware. Process groups have no parent-death/escape guarantee, and killing
+on hardware. A child-side 50 ms parent-lifetime watchdog can terminate a blocked
+main thread on parent death; it is not kernel-enforced parent-death or
+escape containment and cannot overcome process suspension/OS-driver stalls. Killing
 the child cannot prove LED clearing. No hardware, Windows runtime containment,
 or physical input/output acceptance is claimed.
 

@@ -111,15 +111,29 @@ On Linux/macOS, reviewed host-specific native discovery and permissions remain r
 
 Device labels are neutral capability classes, not provenance assertions:
 
-| Class | Transport | Compiled discovery | Compiled diagnostic transport |
-|---|---|---|---|
-| Primary USB controller | USB | Its HID feature on Windows/macOS | Same prerequisite |
-| Related wireless controller | Bluetooth | Primary HID feature on macOS only | Same prerequisite |
-| Alternate controller, original profile | USB | Alternate HID feature on Windows/macOS | Unavailable: decode-only original profile |
-| Alternate controller, second-revision profile | USB | Alternate HID feature on Windows/macOS | Same prerequisite |
-| Serial control surface | Serial | Windows | Windows |
+This describes the emitted `portable_inventory()` fields, not a broader design
+matrix or native scan. Standalone discovery is always unavailable. On macOS
+ARM64, the reason `metadata_only_inside_explicit_hid_probe` is emitted only for
+the matching enabled family feature; it means metadata can be obtained inside
+an explicitly opted-in supervised HID probe, not that discovery ran.
 
-Compiled transport requires the exact profile, permissions, and human opt-in. Missing feature/backend is unavailable. Every row is runtime-unqualified.
+| macOS ARM64 build | Primary USB / related Bluetooth (`micro-hid`) | Alternate second revision (`akp03-hid`) |
+|---|---|---|
+| Default (neither HID feature) | Discovery unavailable: `feature_disabled`; diagnostic unavailable | Discovery unavailable: `feature_disabled`; diagnostic unavailable |
+| Micro only | Metadata-only discovery reason; compiled diagnostic prerequisite | Discovery unavailable: `feature_disabled`; diagnostic unavailable |
+| AKP03 only | Discovery unavailable: `feature_disabled`; diagnostic unavailable | Metadata-only discovery reason; compiled diagnostic prerequisite |
+| Both HID features | Metadata-only discovery reason; compiled diagnostic prerequisite | Metadata-only discovery reason; compiled diagnostic prerequisite |
+
+Disabled-family diagnostic transport retains reason `device_backend_not_integrated`.
+The original alternate profile stays discovery-unavailable with that reason and
+diagnostic-unavailable with `decode_only_original_profile` in every build.
+The serial row stays unavailable with `device_backend_not_integrated`. Windows
+and Linux neutral device-inventory rows are unchanged; Windows CT CLI availability
+is reported separately as `ct_serial_probe_available`, not inferred from these
+rows. `micro-firmware` does not enable HID metadata or probing.
+
+Compiled transport still requires the exact profile/native evidence, permissions,
+private worker capability and human opt-in. Every row is runtime-unqualified.
 
 Maintenance for the primary USB controller imports the maintenance subsystem's capability. Other controller families advertise unavailable maintenance. This inventory does not perform maintenance.
 
@@ -840,10 +854,22 @@ forbids replacement and stickily blocks the process-local supervisor. A previous
 portable-child cleanup uncertainty also blocks this service.
 
 The child checks PGID == PID and that all three standard descriptors are pipes,
-then acquires close-on-exec duplicates. Only after full request validation can
-it establish a private thread-bound, per-request HID capability. Native access
-additionally requires the parent process image path to equal the current
-executable. Ordinary in-process `native_backend()` calls fail with typed
+then starts an independent parent-death watchdog before reading stdin and
+acquires close-on-exec duplicates. The watchdog retains the parent's native
+PID/start time, requires a live matching parent and a startup acknowledgement
+within one second, and polls every 50 ms. Parent reparenting, zombie/exited state,
+lifetime mismatch or unavailable observation causes SIGKILL of the worker's
+retained process group with `_exit(1)` fallback. It does not need HID locks,
+Rust destructors or cooperation from a blocked main thread. It also enforces
+a 120-second maximum before full request receipt, narrowed to the validated
+device-spec budget measured from watchdog startup. On ordinary completion,
+it is stopped/unparked and joined within 250 ms; uncertainty terminates the
+child instead of publishing success.
+
+Only after full request validation and watchdog startup can the child establish
+a private thread-bound, per-request HID capability. Native access additionally
+requires the parent process image path and current executable path to
+canonicalize successfully and match. Ordinary in-process `native_backend()` calls fail with typed
 `UnsupervisedAccess`; health gets no HID capability and never constructs a
 backend, enumerates or opens. IOKit enumeration/open/descriptor/read and output
 check the capability. A stale capability cannot revive in another request.
@@ -851,10 +877,21 @@ Numbered output retains its report ID; unnumbered output strips the synthetic
 zero. Synchronous `IOHIDDeviceSetReport` has no individual write deadline:
 only the supervised child's lifetime is bounded. Reopened identity is reread
 from native properties; unavailable or mismatching evidence fails closed.
+Stopped/finished IOKit run loops return a static protocol error; timed-out
+run-loop slices return read timeout instead of spinning.
 
 This is trusted-code liveness containment, not hostile-code/same-user
-authentication, parent-death containment, an escape-proof sandbox, proof of
-physical output cleanup, or device qualification. No hardware was accessed.
+authentication, an escape-proof sandbox, proof of physical output cleanup, or
+device qualification. Health reports `parent_death_watchdog=true` and 50 ms
+polling, but retains `parent_death_guarantee=false`: a user-space watchdog is
+not a kernel-enforced parent-death guarantee or a hard scheduling/driver bound.
+It cannot run while the entire process is suspended, prove escaped-descendant
+death, or overcome an uninterruptible OS/driver failure. It does not provide a
+durable replacement grant or reaping proof after the supervisor itself dies;
+only the live supervisor's normal process/I/O cleanup can grant replacement.
+Self-authored tests observe orphaned blocked workers exiting and being reaped
+after SIGINT/SIGKILL of the parent, and exercise held pipes and truncated
+response headers/bodies. No hardware was accessed.
 IOKit property/descriptor and physical input/output behavior remain unverified.
 Standalone doctor discovery remains unavailable; diagnostic metadata is obtained
 only inside the explicit HID probe child. Windows Job behavior and its existing
@@ -862,7 +899,7 @@ evidence/runtime limitations are unchanged.
 
 ## 9. Portable bounded stdio diagnostics
 
-Separate from framed Windows worker. Internal caller supplies a Command; this does not expose arbitrary process launch to external request payloads.
+Separate from the framed worker service. Internal caller supplies a Command; this does not expose arbitrary process launch to external request payloads.
 
 Common:
 

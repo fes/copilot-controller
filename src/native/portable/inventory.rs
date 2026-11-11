@@ -13,6 +13,23 @@ const fn unavailable(reason: &'static str) -> Support {
     Support::Unavailable { reason }
 }
 
+pub(super) fn macos_hid_discovery(
+    class: DeviceClass,
+    micro_enabled: bool,
+    akp03_enabled: bool,
+) -> Support {
+    let enabled = match class {
+        DeviceClass::PrimaryUsbController | DeviceClass::RelatedWirelessController => micro_enabled,
+        DeviceClass::AlternateSecondRevisionProfile => akp03_enabled,
+        _ => return unavailable("device_backend_not_integrated"),
+    };
+    if enabled {
+        unavailable("metadata_only_inside_explicit_hid_probe")
+    } else {
+        unavailable("feature_disabled")
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct PlatformSupport {
     pub shared_native_clock: Support,
@@ -185,7 +202,7 @@ pub fn portable_inventory() -> CapabilityInventory {
         framed_job_workers: windows_workers,
         framed_process_group_workers: if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             Support::Compiled {
-                prerequisite: "same_executable_health_or_opt_in_hid_no_parent_death_or_escape_guarantee",
+                prerequisite: "same_executable_health_or_opt_in_hid_parent_watchdog_no_escape_guarantee",
             }
         } else {
             unavailable("unsupported_platform")
@@ -214,14 +231,12 @@ pub fn portable_inventory() -> CapabilityInventory {
     let device = |class, transport, diagnostic_transport| DeviceSupport {
         class,
         transport,
-        discovery: if cfg!(all(target_os = "macos", target_arch = "aarch64"))
-            && matches!(
+        discovery: if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            macos_hid_discovery(
                 class,
-                DeviceClass::PrimaryUsbController
-                    | DeviceClass::RelatedWirelessController
-                    | DeviceClass::AlternateSecondRevisionProfile
-            ) {
-            unavailable("metadata_only_inside_explicit_hid_probe")
+                cfg!(feature = "micro-hid"),
+                cfg!(feature = "akp03-hid"),
+            )
         } else {
             unavailable("device_backend_not_integrated")
         },

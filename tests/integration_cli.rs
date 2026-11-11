@@ -597,6 +597,8 @@ fn offline_api_never_reads_stdin_and_health_is_explicitly_platform_scoped() {
         assert_eq!(value["health"]["process_group"], true);
         assert_eq!(value["health"]["pid"], value["health"]["pgid"]);
         assert_eq!(value["health"]["parent_death_guarantee"], false);
+        assert_eq!(value["health"]["parent_death_watchdog"], true);
+        assert_eq!(value["health"]["parent_death_poll_ms"], 50);
         assert_eq!(value["health"]["escape_guarantee"], false);
     }
     #[cfg(windows)]

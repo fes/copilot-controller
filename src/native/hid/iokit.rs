@@ -5,6 +5,7 @@
 //! opened the device (the transport is therefore `!Send`). Every live operation
 //! requires a private, thread-bound worker capability. Synchronous output has no
 //! individual deadline; the supervised parent can kill and reap the child.
+//! Stopped/finished run loops fail with a bounded static error, never a spin.
 
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_void};
@@ -503,8 +504,10 @@ impl HidTransport for MacTransport {
             if left.is_zero() {
                 return Err(HidError::Timeout);
             }
-            // SAFETY: services this thread's run loop for at most `left`.
-            unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, left.as_secs_f64(), 1) };
+            run_loop_slice(left, |seconds| {
+                // SAFETY: services this thread's run loop for at most `left`.
+                unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, 1) }
+            })?;
         }
     }
 
@@ -517,6 +520,15 @@ impl HidTransport for MacTransport {
             .ok_or(HidError::EvidenceUnavailable(
                 EvidenceKind::RawReportDescriptor,
             ))
+    }
+}
+
+fn run_loop_slice(timeout: Duration, run: impl FnOnce(f64) -> i32) -> Result<(), HidError> {
+    match run(timeout.as_secs_f64()) {
+        1 | 2 => Err(HidError::Protocol("HID run loop stopped or finished")),
+        3 => Err(HidError::Timeout),
+        4 => Ok(()),
+        _ => Err(HidError::Protocol("unexpected HID run loop result")),
     }
 }
 
@@ -553,4 +565,28 @@ pub(crate) fn fixture_output(
     set_report: impl FnOnce(isize, &[u8]) -> i32,
 ) -> Result<usize, HidError> {
     output_report(capability, report, set_report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopped_or_finished_run_loop_fails_without_spinning_or_hardware() {
+        for status in [1, 2, 99] {
+            let mut calls = 0;
+            let error = run_loop_slice(Duration::from_millis(50), |_| {
+                calls += 1;
+                status
+            })
+            .unwrap_err();
+            assert!(matches!(error, HidError::Protocol(_)));
+            assert_eq!(calls, 1);
+        }
+        assert_eq!(
+            run_loop_slice(Duration::from_millis(50), |_| 3),
+            Err(HidError::Timeout),
+        );
+        assert_eq!(run_loop_slice(Duration::from_millis(50), |_| 4), Ok(()));
+    }
 }

@@ -101,11 +101,21 @@ the Micro/AKP03 §9 budgets (caller timeouts can only shorten them). On every
 completion it signals the group while WNOWAIT retains the leader PID, then reaps
 within a two-second per-attempt cleanup budget (Drop may retry once) and
 explicitly closes pipes. Unconfirmed
-cleanup stickily forbids replacement. No parent-death or escape guarantee exists.
+cleanup stickily forbids replacement. An independent child watchdog checks the
+parent's native PID/start time every 50 ms, kills the worker group on parent
+death/mismatch/unavailable observation, and can terminate a blocked main thread
+without destructors or HID locks. Startup is acknowledged within one second;
+ordinary stop/join has a 250 ms budget and fails closed. It also caps child
+lifetime at 120 seconds before request validation, then the device-spec budget.
+This is user-space polling, not a kernel parent-death or escape guarantee;
+suspended processes, scheduler/driver stalls and escaped descendants remain
+outside that guarantee. Watchdog termination cannot grant durable replacement
+eligibility or prove physical output cleanup.
 
 Only a fully validated child callback can receive the private, thread-bound,
 per-request IOKit capability; native access also verifies a same-executable
-parent. Public in-process backend construction fails closed. Health receives no
+parent with both executable paths canonicalized (errors fail closed). Public
+in-process backend construction fails closed. Health receives no
 HID capability and never constructs/enumerates/opens transport. Native IOKit
 output has no per-write deadline and may leave physical state changed on kill.
 CT remains Windows-only; Linux live probes remain disabled. No native descriptor
@@ -124,7 +134,9 @@ health and fail-closed capability paths. Tests cover same-executable success,
 native identity/nonce mismatch, malformed/duplicate/trailing frames, blocked
 stdin, deadline/cancellation kill/reap, stdout/stderr bounds, private-route and
 capability rejection, stale capability invalidation and sticky lost-leader
-cleanup. Fake SetReport fixtures exercise the actual write gate without IOKit
+cleanup, symlink-launched capability, parent termination during a blocked
+callback, held descendant pipes and truncated response headers/bodies.
+Fake SetReport fixtures exercise the actual write gate without IOKit
 enumeration/open/output. Windows runtime tests below remain platform-specific.
 
 `tests.rs` exercises framing, admission, correlation, cancellation, failure

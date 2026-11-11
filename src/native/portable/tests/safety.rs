@@ -7,7 +7,7 @@ use crate::domain::{
 
 use super::super::{
     contracts::{Observation, PlatformError, PlatformErrorKind},
-    inventory::{Support, portable_inventory},
+    inventory::{DeviceClass, Support, macos_hid_discovery, portable_inventory},
     observation::{
         ComPort, DesktopContext, DiagnosticReport, DiagnosticSections, ExecutableClass,
         ForegroundEvidence, ProcessCandidate, ProcessEvidence, ProcessInventory, SerialDiscovery,
@@ -54,6 +54,7 @@ fn compile_time_inventory_never_claims_unintegrated_or_qualified_features() {
             Support::Unavailable { .. }
         ));
     }
+
     if cfg!(any(windows, target_os = "linux", target_os = "macos")) {
         assert!(matches!(
             inventory.platform().cooperative_runtime_ownership,
@@ -98,6 +99,51 @@ fn compile_time_inventory_never_claims_unintegrated_or_qualified_features() {
     assert_eq!(value["command_ready"], false);
     for row in value["devices"].as_array().unwrap() {
         assert_eq!(row["runtime_qualified"], false);
+    }
+}
+
+#[test]
+fn macos_inventory_metadata_depends_on_the_matching_family_feature() {
+    for (micro, akp03) in [(false, false), (true, false), (false, true), (true, true)] {
+        for (class, enabled) in [
+            (DeviceClass::PrimaryUsbController, micro),
+            (DeviceClass::RelatedWirelessController, micro),
+            (DeviceClass::AlternateSecondRevisionProfile, akp03),
+        ] {
+            let support = macos_hid_discovery(class, micro, akp03);
+            assert_eq!(
+                support,
+                Support::Unavailable {
+                    reason: if enabled {
+                        "metadata_only_inside_explicit_hid_probe"
+                    } else {
+                        "feature_disabled"
+                    },
+                }
+            );
+        }
+        for class in [
+            DeviceClass::AlternateOriginalProfile,
+            DeviceClass::SerialControlSurface,
+        ] {
+            assert_eq!(
+                macos_hid_discovery(class, micro, akp03),
+                Support::Unavailable {
+                    reason: "device_backend_not_integrated"
+                },
+            );
+        }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    for device in portable_inventory().devices() {
+        assert_eq!(
+            device.discovery,
+            macos_hid_discovery(
+                device.class,
+                cfg!(feature = "micro-hid"),
+                cfg!(feature = "akp03-hid")
+            )
+        );
     }
 }
 

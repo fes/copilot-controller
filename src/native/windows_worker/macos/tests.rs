@@ -4,6 +4,8 @@ use super::*;
 
 static FIXTURE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+mod reliability;
+
 fn options(micro: bool, health: bool) -> Value {
     if micro {
         json!({
@@ -153,6 +155,8 @@ fn macos_success_identity_correlation_and_bounded_output() {
         ("forge-start", Kind::Protocol),
         ("forge-version", Kind::Protocol),
         ("trailing", Kind::Protocol),
+        ("truncated-header", Kind::Transport),
+        ("truncated-body", Kind::Transport),
         ("oversize", Kind::FrameLimit),
         ("stdout-over", Kind::FrameLimit),
         ("stderr-over", Kind::DiagnosticLimit),
@@ -344,6 +348,7 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
     }
     assert!(hid_worker_capability().is_none());
     {
+        let _watchdog = ParentWatchdog::start().unwrap();
         let _health = WorkerScope::enter(false).unwrap();
         assert!(worker_health().is_ok());
         assert!(hid_worker_capability().is_none());
@@ -357,6 +362,7 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
     }
     let capability;
     {
+        let _watchdog = ParentWatchdog::start().unwrap();
         let _live = WorkerScope::enter(true).unwrap();
         capability = hid_worker_capability().unwrap();
         assert!(capability.valid());
@@ -378,6 +384,7 @@ fn macos_write_capability_is_scoped_health_denied_and_native_output_uses_the_gat
     }
     assert!(!capability.valid());
     {
+        let _watchdog = ParentWatchdog::start().unwrap();
         let _next = WorkerScope::enter(true).unwrap();
         assert!(
             !capability.valid(),

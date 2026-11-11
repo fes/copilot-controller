@@ -147,7 +147,9 @@ with the exact hidden routes, framing and device-spec budgets. All IOKit access
 and writes require a private, scoped child capability and same-executable parent;
 ordinary public in-process native access fails closed. Health constructs no HID
 backend. macOS native evidence remains unverified on hardware, and process groups
-have no parent-death or escape guarantee. CT stays Windows-only; Linux live
+use a child-side parent-lifetime watchdog, not a kernel-enforced parent-death or
+escape guarantee; whole-process suspension and OS/driver stalls remain outside
+its guarantee. CT stays Windows-only; Linux live
 probing remains unavailable. See platform appendix §8.7 for cleanup/fencing.
 State snapshots/recovery and shared
 authority-anchor ownership are explicit library-only APIs; no CLI route invokes

@@ -1203,8 +1203,10 @@ before reports. macOS ARM64 now supports the exact route through the bounded
 process-group child. All IOKit access, including synchronous output, requires
 the private scoped capability and same-executable parent; public in-process
 native access fails closed. Native properties/exact descriptors remain required
-and unverified on hardware. Process groups provide no parent-death/escape
-guarantee. See platform appendix §8.7.
+and unverified on hardware. A 50 ms independent child parent-lifetime watchdog
+can terminate a blocked main thread on parent death, but does not provide
+kernel-enforced parent-death/escape containment or overcome process suspension/
+OS-driver stalls. See platform appendix §8.7.
 Windows failure cleanup may additionally wait up to five seconds for exit and
 one for I/O joining; macOS group cleanup allows two seconds per attempt (Drop
 may retry once) and closes pipes
