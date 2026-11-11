@@ -586,26 +586,6 @@ pub(crate) fn repr_plain_value(value: &Value) -> String {
     repr_value_with_tokens(value, false)
 }
 
-pub(crate) fn has_surrogate_encoding(value: &Value) -> bool {
-    let mut pending = vec![value];
-    while let Some(value) = pending.pop() {
-        match value {
-            Value::String(text) if text.contains(SURROGATE_MARKER) => return true,
-            Value::Array(values) => pending.extend(values),
-            Value::Object(values) => {
-                for (key, value) in values {
-                    if key.contains(SURROGATE_MARKER) {
-                        return true;
-                    }
-                    pending.push(value);
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
 fn repr_value_with_tokens(value: &Value, surrogate_tokens: bool) -> String {
     let mut result = String::new();
     render(&mut result, value, true, surrogate_tokens).expect("Python rendering cannot fail");

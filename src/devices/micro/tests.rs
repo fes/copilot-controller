@@ -295,6 +295,66 @@ fn json_value_equality_respects_surrogate_token_provenance() {
 }
 
 #[test]
+fn json_value_equality_decodes_literal_markers_across_provenance() {
+    use super::value::{JsonValue, parse_json};
+
+    for text in [
+        "\u{fdd0}",
+        "\u{fdd0}\u{fdd0}",
+        "\u{fdd0}sd800",
+        "a\u{fdd0}z",
+    ] {
+        let plain = json!(text);
+        let parsed = parse_json(serde_json::to_string(&plain).unwrap().as_bytes()).unwrap();
+        let literal = JsonValue::from_value(plain);
+        assert_eq!(parsed, literal);
+        assert_eq!(literal, parsed);
+        assert!(parsed.eq(literal.as_value()));
+        assert_eq!(
+            serde_json::from_str::<Value>(&parsed.to_json().unwrap()).unwrap(),
+            *literal.as_value()
+        );
+    }
+
+    let escaped = parse_json(br#""\ufdd0""#).unwrap();
+    assert_eq!(escaped, JsonValue::from_value(json!("\u{fdd0}")));
+    assert!(escaped.eq(&json!("\u{fdd0}")));
+}
+
+#[test]
+fn json_value_equality_decodes_object_keys_across_provenance() {
+    use super::value::{JsonValue, parse_json};
+
+    let plain = json!({
+        "\u{fdd0}": ["\u{fdd0}", {"\u{fdd0}sd800": true}],
+        "\u{fdd0}\u{fdd0}": 2,
+        "\u{fdd0}sd800": 3,
+        "ordinary": null
+    });
+    let parsed = parse_json(serde_json::to_string(&plain).unwrap().as_bytes()).unwrap();
+    let literal = JsonValue::from_value(plain);
+    assert_eq!(parsed, literal);
+    assert_eq!(literal, parsed);
+    assert!(parsed.eq(literal.as_value()));
+    assert_eq!(
+        serde_json::from_str::<Value>(&parsed.to_json().unwrap()).unwrap(),
+        *literal.as_value()
+    );
+    assert_eq!(
+        parsed.into_object().unwrap(),
+        literal.into_object().unwrap()
+    );
+
+    let surrogate_key = parse_json(br#"{"\ud800":1}"#).unwrap();
+    let literal_key = JsonValue::from_value(json!({"\u{fdd0}sd800": 1}));
+    assert_eq!(surrogate_key.as_value(), literal_key.as_value());
+    assert_ne!(surrogate_key, literal_key);
+    assert_ne!(literal_key, surrogate_key);
+    assert!(!surrogate_key.eq(literal_key.as_value()));
+    assert_eq!(surrogate_key.to_json().unwrap(), r#"{"\ud800":1}"#);
+}
+
+#[test]
 fn decoder_size_boundary_retains_overflow_and_empty_chunks_do_not_check_age() {
     let mut decoder = Decoder::new();
     let data = [b'x'; 61];

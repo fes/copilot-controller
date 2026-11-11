@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde_json::{Map, Value, value::RawValue};
 
-use super::json::{has_surrogate_encoding, repr_value, serialize_replay_json};
+use super::json::{repr_value, serialize_replay_json};
 
 const SURROGATE_MARKER: char = '\u{fdd0}';
 /// Maximum encoded size returned by the replay JSON serializers.
@@ -46,6 +46,7 @@ impl fmt::Display for JsonSerializeError {
 impl std::error::Error for JsonSerializeError {}
 
 /// An owned JSON value whose destruction does not recurse through nested data.
+/// Equality compares string and key meaning while retaining surrogate provenance for replay.
 pub struct JsonValue {
     value: Option<Value>,
     // Parsed values encode surrogate code units in otherwise-valid Rust strings.
@@ -126,20 +127,54 @@ impl fmt::Debug for JsonValue {
     }
 }
 
-fn equal_values(left: &Value, right: &Value) -> bool {
+fn encoded_literal_chars(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.chars().flat_map(|character| {
+        [
+            Some(character),
+            (character == SURROGATE_MARKER).then_some(character),
+        ]
+        .into_iter()
+        .flatten()
+    })
+}
+
+fn equal_values(
+    left: &Value,
+    right: &Value,
+    left_surrogate_tokens: bool,
+    right_surrogate_tokens: bool,
+) -> bool {
+    let cross_provenance = left_surrogate_tokens != right_surrogate_tokens;
+    // Across provenance modes, compare the parsed encoding against encoded plain text.
+    let (left, right) = if cross_provenance && right_surrogate_tokens {
+        (right, left)
+    } else {
+        (left, right)
+    };
     let mut pending = vec![(left, right)];
     while let Some((left, right)) = pending.pop() {
         match (left, right) {
             (Value::Null, Value::Null) => {}
             (Value::Bool(left), Value::Bool(right)) if left == right => {}
             (Value::Number(left), Value::Number(right)) if left == right => {}
-            (Value::String(left), Value::String(right)) if left == right => {}
+            (Value::String(left), Value::String(right)) => {
+                let equal = if cross_provenance {
+                    left.chars().eq(encoded_literal_chars(right))
+                } else {
+                    left == right
+                };
+                if !equal {
+                    return false;
+                }
+            }
             (Value::Array(left), Value::Array(right)) if left.len() == right.len() => {
                 pending.extend(left.iter().zip(right));
             }
             (Value::Object(left), Value::Object(right)) if left.len() == right.len() => {
-                for (key, left) in left {
-                    let Some(right) = right.get(key) else {
+                for (key, right) in right {
+                    let encoded = (cross_provenance && key.contains(SURROGATE_MARKER))
+                        .then(|| encoded_literal_chars(key).collect::<String>());
+                    let Some(left) = left.get(encoded.as_deref().unwrap_or(key)) else {
                         return false;
                     };
                     pending.push((left, right));
@@ -153,26 +188,18 @@ fn equal_values(left: &Value, right: &Value) -> bool {
 
 impl PartialEq for JsonValue {
     fn eq(&self, other: &Self) -> bool {
-        if self.surrogate_tokens != other.surrogate_tokens {
-            let tokenized = if self.surrogate_tokens {
-                self.as_value()
-            } else {
-                other.as_value()
-            };
-            if has_surrogate_encoding(tokenized) {
-                return false;
-            }
-        }
-        equal_values(self.as_value(), other.as_value())
+        equal_values(
+            self.as_value(),
+            other.as_value(),
+            self.surrogate_tokens,
+            other.surrogate_tokens,
+        )
     }
 }
 
 impl PartialEq<Value> for JsonValue {
     fn eq(&self, other: &Value) -> bool {
-        if self.surrogate_tokens && has_surrogate_encoding(self.as_value()) {
-            return false;
-        }
-        equal_values(self.as_value(), other)
+        equal_values(self.as_value(), other, self.surrogate_tokens, false)
     }
 }
 
