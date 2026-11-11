@@ -8,8 +8,11 @@
 //! Foundation, Security, Security_Authorization, Storage_FileSystem, System_IO,
 //! and System_Threading features. Windows read-only operations and locking an
 //! existing anchor are implemented, but mutations and lock-file creation fail
-//! closed until supported namespace durability is established. Unsupported
-//! targets fail closed.
+//! closed with `windows_directory_durability_unavailable`: crash/power-loss
+//! persistence of namespace creation, replacement, and evidence removal is not
+//! established by file flushes or the available unprivileged replace operation.
+//! Fixed local disks do not remove this limitation. Unsupported targets fail
+//! closed.
 
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -342,58 +345,115 @@ pub struct ReadFile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TailIdentity(native::Identity);
 
+/// Handle-derived last-write and metadata-change timestamps. Compare for
+/// equality only; this is not a content digest or an unforgeable generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TailChangeIdentity(native::ChangeIdentity);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TailMetadata {
     pub identity: TailIdentity,
     pub len: u64,
+    pub change: TailChangeIdentity,
 }
 
 /// A read-only, no-follow event-file handle. Unlike private state, its file
 /// permissions and filesystem are not required to be private or local.
 pub struct TailFile {
     inner: native::Tail,
+    observed: TailMetadata,
 }
 
 impl TailFile {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let inner = native::Tail::open(path.as_ref())?;
+        let (len, change) = inner.validate()?;
         Ok(Self {
-            inner: native::Tail::open(path.as_ref())?,
+            observed: TailMetadata {
+                identity: TailIdentity(inner.id),
+                len,
+                change: TailChangeIdentity(change),
+            },
+            inner,
         })
     }
 
+    /// Pollers must retain this snapshot with their offset. A changed `change`
+    /// at a previously observed EOF requires restarting reduction from zero,
+    /// even when the file identity and length have not changed.
     pub fn metadata(&self) -> Result<TailMetadata> {
+        let (len, change) = self.inner.validate()?;
         Ok(TailMetadata {
             identity: TailIdentity(self.inner.id),
-            len: self.inner.validate()?,
+            len,
+            change: TailChangeIdentity(change),
         })
     }
 
-    /// Read at most `limit` bytes and reject a replaced or truncated file.
-    /// Interpreting lines, offsets, and concurrent appends belongs to the
-    /// higher-level tailer.
+    /// Read at most `limit` bytes. Reject replacement, truncation, or a
+    /// same-size modification during or since the last successful read/open.
+    /// Reopen after a source-change error; interpreting records and resetting
+    /// reducer state belongs to the higher-level tailer.
     pub fn read_at(&mut self, offset: u64, limit: usize) -> Result<Vec<u8>> {
+        self.read_at_using(offset, limit, |file, limit| {
+            let mut bytes = Vec::new();
+            file.take(limit as u64).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+    }
+
+    fn read_at_using(
+        &mut self,
+        offset: u64,
+        limit: usize,
+        read: impl FnOnce(&mut std::fs::File, usize) -> std::io::Result<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
         if limit > MAX_BOUNDED_READ {
             return Err(Error::new(ErrorKind::TooLarge, "tail_bound"));
         }
-        let before = self.inner.validate()?;
-        if offset > before {
-            return Err(Error::new(ErrorKind::Changed, "tail_truncated"));
-        }
-        self.inner
-            .file
-            .seek(SeekFrom::Start(offset))
-            .map_err(|e| Error::os(ErrorKind::Io, "tail_seek", e))?;
-        let mut bytes = Vec::new();
-        (&mut self.inner.file)
-            .take(limit as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|e| Error::os(ErrorKind::Io, "tail_read", e))?;
-        let after = self.inner.validate()?;
-        if after < before || offset.saturating_add(bytes.len() as u64) > after {
-            return Err(Error::new(ErrorKind::Changed, "tail_truncated"));
-        }
-        Ok(bytes)
+        let before = self.metadata()?;
+        let inner = &mut self.inner;
+        read_tail_at(&mut self.observed, before, offset, || {
+            inner
+                .file
+                .seek(SeekFrom::Start(offset))
+                .map_err(|e| Error::os(ErrorKind::Io, "tail_seek", e))?;
+            let bytes = read(&mut inner.file, limit)
+                .map_err(|e| Error::os(ErrorKind::Io, "tail_read", e))?;
+            let (len, change) = inner.validate()?;
+            Ok((
+                bytes,
+                TailMetadata {
+                    identity: TailIdentity(inner.id),
+                    len,
+                    change: TailChangeIdentity(change),
+                },
+            ))
+        })
     }
+}
+
+fn read_tail_at(
+    observed: &mut TailMetadata,
+    before: TailMetadata,
+    offset: u64,
+    read: impl FnOnce() -> Result<(Vec<u8>, TailMetadata)>,
+) -> Result<Vec<u8>> {
+    if before.len == observed.len && before.change != observed.change {
+        return Err(Error::new(ErrorKind::Changed, "tail_modified"));
+    }
+    if offset > before.len {
+        return Err(Error::new(ErrorKind::Changed, "tail_truncated"));
+    }
+    let (bytes, after) = read()?;
+    if after.len < before.len || offset.saturating_add(bytes.len() as u64) > after.len {
+        return Err(Error::new(ErrorKind::Changed, "tail_truncated"));
+    }
+    if after.len == before.len && after.change != before.change {
+        return Err(Error::new(ErrorKind::Changed, "tail_modified"));
+    }
+    *observed = after;
+    Ok(bytes)
 }
 
 impl ReadFile {

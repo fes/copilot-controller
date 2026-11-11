@@ -17,6 +17,12 @@ pub(super) struct Identity {
     ino: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ChangeIdentity {
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
 pub(super) struct File {
     pub(super) file: StdFile,
     pub(super) id: Identity,
@@ -90,7 +96,7 @@ impl Tail {
         Ok(tail)
     }
 
-    pub(super) fn validate(&self) -> Result<u64> {
+    pub(super) fn validate(&self) -> Result<(u64, ChangeIdentity)> {
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != self.uid {
             return Err(Error::new(ErrorKind::Changed, "effective_user"));
@@ -114,8 +120,20 @@ impl Tail {
         if identity(&held) != self.id || identity(&named) != self.id {
             return Err(Error::new(ErrorKind::Changed, "tail_identity"));
         }
-        u64::try_from(held.st_size).map_err(|_| Error::new(ErrorKind::UnsafeFile, "tail_size"))
+        tail_snapshot(&held)
     }
+}
+
+fn tail_snapshot(stat: &libc::stat) -> Result<(u64, ChangeIdentity)> {
+    let len =
+        u64::try_from(stat.st_size).map_err(|_| Error::new(ErrorKind::UnsafeFile, "tail_size"))?;
+    Ok((
+        len,
+        ChangeIdentity {
+            modified: (stat.st_mtime, stat.st_mtime_nsec),
+            changed: (stat.st_ctime, stat.st_ctime_nsec),
+        },
+    ))
 }
 
 impl Root {

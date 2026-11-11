@@ -260,6 +260,138 @@ fn read_only_tail_allows_public_file_but_not_unsafe_links_or_replacement() {
     );
 }
 
+#[test]
+#[ignore = "requires an explicitly configured, policy-approved native filesystem"]
+fn tail_same_size_mixed_read_is_rejected() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("events.jsonl");
+    fs::write(&path, b"old\nold\n").unwrap();
+    let mut tail = TailFile::open(&path).unwrap();
+    let before = tail.metadata().unwrap();
+    let error = tail
+        .read_at_using(0, 8, |file, limit| {
+            let mut bytes = vec![0; limit];
+            file.read_exact(&mut bytes[..4])?;
+            fs::write(&path, b"new\nnew\n")?;
+            fs::File::options()
+                .write(true)
+                .open(&path)?
+                .set_modified(UNIX_EPOCH + Duration::from_secs(123))?;
+            file.read_exact(&mut bytes[4..])?;
+            assert_eq!(bytes, b"old\nnew\n");
+            Ok(bytes)
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Changed);
+    assert_eq!(error.operation(), "tail_modified");
+    let after = tail.metadata().unwrap();
+    assert_eq!(before.identity, after.identity);
+    assert_eq!(before.len, after.len);
+    assert_ne!(before.change, after.change);
+}
+
+#[test]
+#[ignore = "requires an explicitly configured, policy-approved native filesystem"]
+fn tail_same_length_rewrite_at_eof_changes_metadata_and_is_rejected() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("events.jsonl");
+    fs::write(&path, b"old\n").unwrap();
+    let mut tail = TailFile::open(&path).unwrap();
+    assert_eq!(tail.read_at(0, 4).unwrap(), b"old\n");
+    let before = tail.metadata().unwrap();
+    fs::write(&path, b"new\n").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_secs(456))
+        .unwrap();
+    let after = tail.metadata().unwrap();
+    assert_eq!(before.identity, after.identity);
+    assert_eq!(before.len, after.len);
+    assert_ne!(before.change, after.change);
+    assert_eq!(tail.read_at(4, 4).unwrap_err().kind(), ErrorKind::Changed);
+    let mut restarted = TailFile::open(&path).unwrap();
+    assert_eq!(restarted.read_at(0, 4).unwrap(), b"new\n");
+    assert!(restarted.read_at(4, 4).unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires an explicitly configured, policy-approved native filesystem"]
+fn tail_change_identity_detects_rewrite_with_restored_mtime() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("events.jsonl");
+    fs::write(&path, b"old\n").unwrap();
+    let original_time = UNIX_EPOCH + Duration::from_secs(789);
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(original_time)
+        .unwrap();
+    let mut tail = TailFile::open(&path).unwrap();
+    assert_eq!(tail.read_at(0, 4).unwrap(), b"old\n");
+    let before = tail.metadata().unwrap();
+    // Let even coarse native change timestamps advance; restore mtime so only
+    // the handle-derived change timestamp can reveal this same-length rewrite.
+    std::thread::sleep(Duration::from_millis(1100));
+    fs::write(&path, b"new\n").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(original_time)
+        .unwrap();
+    assert_eq!(
+        fs::metadata(&path).unwrap().modified().unwrap(),
+        original_time
+    );
+    let after = tail.metadata().unwrap();
+    assert_eq!(before.identity, after.identity);
+    assert_eq!(before.len, after.len);
+    assert_ne!(before.change, after.change);
+    assert_eq!(tail.read_at(4, 4).unwrap_err().kind(), ErrorKind::Changed);
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires an explicitly configured fixed-disk Windows fixture"]
+fn windows_mutations_fail_before_namespace_changes() {
+    let fixture = Fixture::new();
+    let root = PrivateRoot::open(&fixture.root).unwrap();
+    for result in [
+        root.check_mutation_support(),
+        root.create_exclusive(&name("new"), b"no"),
+        root.try_lock(&name("new-lock")).map(drop),
+    ] {
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnsupportedPlatform);
+        assert_eq!(
+            error.operation(),
+            "windows_directory_durability_unavailable"
+        );
+    }
+    assert_eq!(fs::read_dir(&fixture.root).unwrap().count(), 0);
+
+    // An existing lock can be used, but must not authorize durable publication
+    // or recovery cleanup. Only the test fixture bypasses the mutation gate.
+    drop(root.inner.create_file(&name("existing-lock")).unwrap());
+    let lock = root.try_lock(&name("existing-lock")).unwrap();
+    for result in [
+        lock.publish_prepared(
+            &name("prepared"),
+            &name("state"),
+            PublishMode::Create,
+            b"",
+            8,
+        ),
+        lock.discard_prepared(&name("prepared"), b"", 8),
+    ] {
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::UnsupportedPlatform);
+    }
+    assert_eq!(fs::read_dir(&fixture.root).unwrap().count(), 1);
+}
+
 #[cfg(unix)]
 #[test]
 #[ignore = "requires an explicitly configured, policy-approved native filesystem"]

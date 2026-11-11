@@ -5,6 +5,9 @@ use std::path::Path;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Identity;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ChangeIdentity;
+
 pub(super) struct Tail {
     pub(super) file: StdFile,
     pub(super) id: Identity,
@@ -15,7 +18,7 @@ impl Tail {
         unavailable()
     }
 
-    pub(super) fn validate(&self) -> Result<u64> {
+    pub(super) fn validate(&self) -> Result<(u64, ChangeIdentity)> {
         unavailable()
     }
 }

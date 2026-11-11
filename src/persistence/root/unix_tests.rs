@@ -1,7 +1,7 @@
 use super::super::tests::{Fixture, exercise_process_lock};
 use super::*;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
 
 fn stat_with(
@@ -161,6 +161,102 @@ fn synthetic_descriptor_checks_use_only_the_unique_fixture() {
         old,
         identity(&stat_fd(&new_directory, "synthetic_root").unwrap())
     );
+}
+
+fn descriptor_tail_snapshot(file: &StdFile) -> super::super::TailMetadata {
+    let stat = stat_fd(file, "synthetic_tail_stat").unwrap();
+    let (len, change) = tail_snapshot(&stat).unwrap();
+    super::super::TailMetadata {
+        identity: super::super::TailIdentity(identity(&stat)),
+        len,
+        change: super::super::TailChangeIdentity(change),
+    }
+}
+
+#[test]
+fn synthetic_tail_read_rejects_mixed_same_size_bytes_without_committing_snapshot() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("events");
+    fs::write(&path, b"old\nold\n").unwrap();
+    let mut file = StdFile::open(&path).unwrap();
+    let mut observed = descriptor_tail_snapshot(&file);
+    let original = observed;
+    let error = super::super::read_tail_at(&mut observed, original, 0, || {
+        let mut bytes = vec![0; 8];
+        file.read_exact(&mut bytes[..4]).unwrap();
+        fs::write(&path, b"new\nnew\n").unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(123))
+            .unwrap();
+        file.read_exact(&mut bytes[4..]).unwrap();
+        assert_eq!(bytes, b"old\nnew\n");
+        Ok((bytes, descriptor_tail_snapshot(&file)))
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Changed);
+    assert_eq!(error.operation(), "tail_modified");
+    assert_eq!(observed, original);
+}
+
+#[test]
+fn synthetic_tail_eof_rewrite_with_restored_mtime_is_not_an_empty_poll() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("events");
+    fs::write(&path, b"old\n").unwrap();
+    let original_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(789);
+    let writer = OpenOptions::new().write(true).open(&path).unwrap();
+    writer.set_modified(original_time).unwrap();
+    let mut file = StdFile::open(&path).unwrap();
+    let mut observed = descriptor_tail_snapshot(&file);
+    let before = observed;
+    assert_eq!(
+        super::super::read_tail_at(&mut observed, before, 0, || {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            Ok((bytes, descriptor_tail_snapshot(&file)))
+        })
+        .unwrap(),
+        b"old\n"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(&path, b"new\n").unwrap();
+    writer.set_modified(original_time).unwrap();
+    let after = descriptor_tail_snapshot(&file);
+    assert_eq!(file.metadata().unwrap().modified().unwrap(), original_time);
+    assert_eq!(before.identity, after.identity);
+    assert_eq!(before.len, after.len);
+    assert_ne!(before.change, after.change);
+    let error = super::super::read_tail_at(&mut observed, after, 4, || {
+        panic!("same-size rewrite must be rejected before attempting an EOF read")
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Changed);
+    assert_eq!(observed, before);
+
+    // A caller resets its reducer and snapshot after source change. Normal
+    // appends must still be readable rather than treated as same-size rewrites.
+    observed = after;
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"appended\n")
+        .unwrap();
+    let appended = descriptor_tail_snapshot(&file);
+    assert_eq!(
+        super::super::read_tail_at(&mut observed, appended, 4, || {
+            file.seek(SeekFrom::Start(4)).unwrap();
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            Ok((bytes, descriptor_tail_snapshot(&file)))
+        })
+        .unwrap(),
+        b"appended\n"
+    );
+    assert_eq!(observed, appended);
 }
 
 #[test]

@@ -26,12 +26,12 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, DeleteFileW, FILE_ALL_ACCESS,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileIdInfo,
-    GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileType,
-    LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, MOVEFILE_WRITE_THROUGH,
-    MoveFileExW, OPEN_EXISTING, READ_CONTROL, ReplaceFileW, SYNCHRONIZE,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileBasicInfo,
+    FileIdInfo, GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    GetFileType, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING, READ_CONTROL, ReplaceFileW, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::Threading::{
@@ -47,6 +47,12 @@ const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 pub(super) struct Identity {
     volume: u64,
     file: [u8; 16],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ChangeIdentity {
+    modified: i64,
+    changed: i64,
 }
 
 pub(super) struct File {
@@ -113,7 +119,7 @@ impl Tail {
         Ok(tail)
     }
 
-    pub(super) fn validate(&self) -> Result<u64> {
+    pub(super) fn validate(&self) -> Result<(u64, ChangeIdentity)> {
         for directory in &self.directories {
             check_directory_info(&file_info(&directory.file)?)?;
             if file_identity(&directory.file)? != directory.id {
@@ -138,7 +144,32 @@ impl Tail {
         if file_identity(&self.file)? != self.id || file_identity(&named)? != self.id {
             return Err(Error::new(ErrorKind::Changed, "tail_identity"));
         }
-        Ok((u64::from(held.nFileSizeHigh) << 32) | u64::from(held.nFileSizeLow))
+        // SAFETY: the live file handle and correctly sized output buffer are
+        // valid for the duration of this synchronous metadata query.
+        let basic = unsafe {
+            let mut basic: FILE_BASIC_INFO = zeroed();
+            if GetFileInformationByHandleEx(
+                self.file.as_raw_handle(),
+                FileBasicInfo,
+                (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            ) == 0
+            {
+                return Err(Error::os(
+                    ErrorKind::Io,
+                    "tail_change_metadata",
+                    io::Error::last_os_error(),
+                ));
+            }
+            basic
+        };
+        Ok((
+            (u64::from(held.nFileSizeHigh) << 32) | u64::from(held.nFileSizeLow),
+            ChangeIdentity {
+                modified: basic.LastWriteTime,
+                changed: basic.ChangeTime,
+            },
+        ))
     }
 }
 

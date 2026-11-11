@@ -676,6 +676,21 @@ reparse points, pipes, or hardlinked files.
 
 Windows:
 
+- Implementation limitation: the current private-root boundary supports
+  read-only access and locking an existing anchor, **not durable mutations**,
+  even on fixed local disks. `check_mutation_support`, exclusive creation,
+  creation of a missing lock anchor, publication, and recovery discard fail
+  closed with `UnsupportedPlatform` /
+  `windows_directory_durability_unavailable` before changing the namespace.
+  The unsupported guarantee is crash/power-loss persistence of directory-entry
+  creation, replacement, and removal, including evidence cleanup. Flushing a
+  file handle alone does not establish that guarantee; successful directory
+  `FlushFileBuffers` is not a documented substitute, `ReplaceFileW` has no
+  supported write-through flag, and initial write-through move alone does not
+  cover the complete protocol. Volume-wide flushing requires privileges and
+  is not implemented. Do not claim Windows persistence acceptance (including
+  S03 publication/old-reader acceptance) until a supported complete strategy
+  is implemented and tested natively.
 - Only absolute drive-letter paths on fixed local disks.
 - Pin every ancestor using directory handles without delete sharing; refuse
   reparse ancestors. Do not claim network/removable semantics.
@@ -713,6 +728,13 @@ Unix:
 
 Read-only event tails need not have private file permissions or use one of the
 state filesystems, but still reject unsafe links/types and unsafe path walking.
+The native tail boundary exposes handle-derived last-write and change timestamps
+as an opaque equality token alongside file identity and length. Pollers retain
+this token to reset at a changed EOF. Reads reject same-size timestamp changes
+during a read or since the last successful read/open, while ordinary appends
+remain permitted. Reopen after a source-change error and reset reducer state.
+These timestamps are not a content digest or an unforgeable generation: native
+timestamp precision and update behavior still apply.
 This boundary is not a sandbox against malicious code running as the same user.
 Crash-injection tests are not physical power-loss qualification.
 
