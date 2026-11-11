@@ -147,6 +147,8 @@ pub struct MicroProbeResult {
     pub report: Progress,
     #[serde(deserialize_with = "required_nullable")]
     pub error: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub response_limit: Option<super::super::probe_result::ResponseLimit>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -701,11 +703,7 @@ impl ProbeSession<'_> {
                         self.io.now().saturating_sub(self.started),
                     )?;
                 }
-                ReadOutcome::Ignored => {}
-                ReadOutcome::Idle if self.io.now() < deadline && timeout > Duration::ZERO => {
-                    return Err("Micro clock did not advance during drain".to_owned());
-                }
-                ReadOutcome::Idle => {}
+                ReadOutcome::Ignored | ReadOutcome::Idle => {}
             }
         }
         Ok(())
@@ -735,11 +733,7 @@ impl ProbeSession<'_> {
                         self.io.now().saturating_sub(self.started),
                     )?;
                 }
-                ReadOutcome::Ignored => {}
-                ReadOutcome::Idle if self.io.now() < deadline => {
-                    return Err("Micro clock did not advance during capture".to_owned());
-                }
-                ReadOutcome::Idle => {}
+                ReadOutcome::Ignored | ReadOutcome::Idle => {}
             }
         }
         Ok(())
@@ -1120,6 +1114,73 @@ mod tests {
         assert_eq!(result.report.output_reports, 2);
         assert_eq!(result.report.output_attempts, 2);
         assert!(!result.command_ready && !result.hardware_qualified);
+    }
+
+    #[test]
+    fn quiet_capture_continues_across_multiple_read_slices() {
+        let (mut fake, _) = pattern_flow_fake(true, false);
+        let result = run_qualified(
+            &mut fake,
+            &descriptor(),
+            MicroProbeOptions {
+                capture_ms: 125,
+                ..Default::default()
+            },
+        );
+        assert!(result.probe_succeeded, "{:?}", result.error);
+        assert_eq!(result.report.phase, "complete");
+        assert_eq!(result.report.elapsed_ms, 125);
+        assert_eq!(result.report.read_reports, 0);
+        assert!(result.report.captures.is_empty());
+        assert!(fake.writes.is_empty());
+    }
+
+    #[test]
+    fn early_idle_reads_continue_drain_until_its_fixed_deadline() {
+        struct EarlyIdle {
+            now: Duration,
+            timeouts: Vec<Duration>,
+            empty: bool,
+        }
+        impl ProbeIo for EarlyIdle {
+            fn now(&self) -> Duration {
+                self.now
+            }
+            fn write(&mut self, _: &[u8]) -> Result<usize, HidError> {
+                panic!("quiet drain must not write");
+            }
+            fn read(&mut self, _: usize, timeout: Duration) -> Result<Vec<u8>, HidError> {
+                self.timeouts.push(timeout);
+                self.now += timeout.min(Duration::from_millis(10));
+                if self.empty {
+                    Ok(Vec::new())
+                } else {
+                    Err(HidError::Timeout)
+                }
+            }
+        }
+        for empty in [false, true] {
+            let mut io = EarlyIdle {
+                now: Duration::ZERO,
+                timeouts: Vec::new(),
+                empty,
+            };
+            let mut rpc = RpcClient::new();
+            let mut decoder = LegacyDecoder::new(Calibration::default());
+            let mut report = Progress::default();
+            ProbeSession {
+                io: &mut io,
+                rpc: &mut rpc,
+                decoder: &mut decoder,
+                report: &mut report,
+                started: Duration::ZERO,
+            }
+            .drain()
+            .unwrap();
+            assert_eq!(io.now, DRAIN_INTERVAL);
+            assert_eq!(io.timeouts, [50, 40, 30, 20, 10].map(Duration::from_millis));
+            assert_eq!(report.read_reports, 0);
+        }
     }
 
     #[test]

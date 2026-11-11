@@ -47,6 +47,7 @@ pub(super) struct ResponseEnvelope {
 pub(super) enum Outcome {
     Ok { payload: Value },
     CallbackFailed,
+    ResponseEncodingFailed,
 }
 
 #[cfg(any(windows, test))]
@@ -128,6 +129,37 @@ pub(super) fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>, WorkerErr
     }
     frame.bytes[..4].copy_from_slice(&(body_len as u32).to_le_bytes());
     Ok(frame.bytes)
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn encode_response(
+    outcome: &impl Serialize,
+    request_nonce: Uuid,
+    worker: WorkerIdentity,
+) -> Result<Vec<u8>, WorkerErrorKind> {
+    #[derive(Serialize)]
+    struct Envelope<'a, T> {
+        version: u32,
+        request_nonce: Uuid,
+        worker: WorkerIdentity,
+        outcome: &'a T,
+    }
+    encode_frame(&Envelope {
+        version: VERSION,
+        request_nonce,
+        worker,
+        outcome,
+    })
+    .or_else(|_| {
+        // Encoding finishes before writing any stdout bytes. Even an oversized
+        // callback gets a correlated compact failure instead of unframed EOF.
+        encode_frame(&Envelope {
+            version: VERSION,
+            request_nonce,
+            worker,
+            outcome: &Outcome::ResponseEncodingFailed,
+        })
+    })
 }
 
 #[cfg(any(windows, test))]

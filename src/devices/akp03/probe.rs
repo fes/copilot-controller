@@ -110,6 +110,8 @@ pub struct Akp03ProbeResult {
     pub report: Progress,
     #[serde(deserialize_with = "required_nullable")]
     pub error: Option<String>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub response_limit: Option<super::super::probe_result::ResponseLimit>,
 }
 
 pub trait ProbeIo {

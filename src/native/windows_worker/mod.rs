@@ -49,6 +49,8 @@ impl DiagnosticWorkerRoute {
 }
 /// Maximum JSON body size, excluding the four-byte frame header.
 pub const MAX_FRAME_BODY_BYTES: usize = 65_536;
+/// Leaves room for the fixed response envelope, even with maximal worker IDs.
+pub const MAX_CALLBACK_PAYLOAD_BYTES: usize = MAX_FRAME_BODY_BYTES - 256;
 /// Maximum discarded worker stderr, including the boundary.
 pub const MAX_DIAGNOSTIC_BYTES: usize = 16_384;
 

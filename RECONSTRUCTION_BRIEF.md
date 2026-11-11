@@ -148,6 +148,11 @@ State snapshots/recovery and shared
 authority-anchor ownership are explicit library-only APIs; no CLI route invokes
 them. No native updater is wired. No probe is action-ready or physically
 qualified; cross-compilation and synthetic tests are not hardware acceptance.
+HID results are budgeted after native cleanup. Oversize exports fail explicitly
+with omission/truncation metadata, keeping whole semantic values or whole report
+prefixes, native write counts and cleanup flags. The unchanged bounded worker
+frame has a correlated compact encoding-failure fallback; it no longer silently
+loses oversized callback responses after possible writes.
 Windows namespace mutations remain explicitly unavailable. Compiled codecs and
 test-only maintenance models are not runtime or physical acceptance.
 Native persistence acceptance tests require an explicitly approved filesystem

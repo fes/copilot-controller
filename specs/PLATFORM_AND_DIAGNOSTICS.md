@@ -684,6 +684,15 @@ Wire response:
 ```
 
 Alternate outcome: `{"status":"callback_failed"}`.
+Encoding failure outcome: `{"status":"response_encoding_failed"}`.
+
+Encode the full response before writing any protocol stdout. If callback
+serialization or the 65536-byte frame budget fails, encode this compact fallback
+with the same version, nonce and worker identity, write it, then exit normally.
+The supervisor maps it to `frame_limit` after pipe/exit completion. It is not
+probe success or proof that no device writes occurred. No frame bound is relaxed.
+Device callbacks reserve 256 bytes for maximal envelope/identity overhead, and
+apply their explicit result-omission policies after cleanup.
 
 Envelope/request/worker records reject unknown fields. Arbitrary payload does not. Do not impose blanket unknown-field rejection on outcome internals beyond actual schema behavior.
 
@@ -786,7 +795,9 @@ Cleanup:
 Failure precedence matters:
 
 - Framed callback_failed -> `callback`.
-- Oversized callback response may become `transport`, because worker cannot encode/write response.
+- Oversized cooperative callback response becomes correlated `response_encoding_failed`,
+  mapped to `frame_limit`; an uncooperative/raw oversized fixture can still fail
+  as `transport` or `frame_limit`.
 - Stdout `not-a-frame` -> `frame_limit`, as first four bytes decode as excessive length.
 - Nonzero exit -> `worker_failed` only once required pipe results/drain are available; earlier transport/protocol failures can win.
 

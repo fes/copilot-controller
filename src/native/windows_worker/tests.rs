@@ -113,6 +113,84 @@ fn frame_handles_one_byte_reads_and_exact_eof() {
 }
 
 #[test]
+fn response_encoding_is_inclusive_and_failure_returns_a_correlated_compact_frame() {
+    let identity = WorkerIdentity {
+        pid: u32::MAX,
+        creation_time_100ns: u64::MAX,
+    };
+    let nonce = Uuid::from_u128(u128::MAX);
+    let empty =
+        protocol::encode_response(&Outcome::Ok { payload: json!("") }, nonce, identity).unwrap();
+    let length = MAX_FRAME_BODY_BYTES - (empty.len() - 4);
+    let exact = protocol::encode_response(
+        &Outcome::Ok {
+            payload: json!("x".repeat(length)),
+        },
+        nonce,
+        identity,
+    )
+    .unwrap();
+    assert_eq!(exact.len(), MAX_FRAME_BODY_BYTES + 4);
+    let decoded: ResponseEnvelope = protocol::read_frame(&mut Cursor::new(exact)).unwrap();
+    assert!(matches!(
+        protocol::validate_response(decoded, nonce, identity).unwrap(),
+        Outcome::Ok { .. }
+    ));
+
+    let too_large = Outcome::Ok {
+        payload: json!("x".repeat(length + 1)),
+    };
+    let bounded = protocol::encode_response(&too_large, nonce, identity).unwrap();
+    assert!(bounded.len() < 256);
+    let decoded: ResponseEnvelope = protocol::read_frame(&mut Cursor::new(bounded)).unwrap();
+    let outcome = protocol::validate_response(decoded, nonce, identity).unwrap();
+    assert!(matches!(outcome, Outcome::ResponseEncodingFailed));
+    let mut progress = Progress {
+        send: Some(Ok(())),
+        response: Some(Ok(outcome)),
+        stderr: Some(Ok(())),
+        exit: Some(Ok(0)),
+    };
+    assert_eq!(
+        progress.decide(false, false),
+        Some(Err(WorkerErrorKind::FrameLimit))
+    );
+
+    struct Broken;
+    impl Serialize for Broken {
+        fn serialize<S: Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(S::Error::custom("private serialization failure"))
+        }
+    }
+    let bounded = protocol::encode_response(&Broken, nonce, identity).unwrap();
+    assert!(!String::from_utf8_lossy(&bounded).contains("private"));
+    let decoded: ResponseEnvelope = protocol::read_frame(&mut Cursor::new(bounded)).unwrap();
+    assert!(matches!(
+        protocol::validate_response(decoded, nonce, identity).unwrap(),
+        Outcome::ResponseEncodingFailed,
+    ));
+}
+
+#[test]
+fn callback_payload_budget_fits_the_worst_case_response_envelope() {
+    let identity = WorkerIdentity {
+        pid: u32::MAX,
+        creation_time_100ns: u64::MAX,
+    };
+    let nonce = Uuid::from_u128(u128::MAX);
+    let outcome = Outcome::Ok {
+        payload: json!("x".repeat(MAX_CALLBACK_PAYLOAD_BYTES - 2)),
+    };
+    let frame = protocol::encode_response(&outcome, nonce, identity).unwrap();
+    assert!(frame.len() <= MAX_FRAME_BODY_BYTES + 4);
+    let decoded: ResponseEnvelope = protocol::read_frame(&mut Cursor::new(frame)).unwrap();
+    assert!(matches!(
+        protocol::validate_response(decoded, nonce, identity).unwrap(),
+        Outcome::Ok { .. }
+    ));
+}
+
+#[test]
 fn duplicate_keys_are_rejected_before_callback_payload_becomes_value() {
     for body in [
         br#"{"kind":"ct_serial_probe","payload":{"capture_ms":0,"capture_ms":1}}"#.as_slice(),

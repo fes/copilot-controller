@@ -87,12 +87,16 @@ impl Progress {
         if matches!(outcome, Outcome::CallbackFailed) {
             return Some(Err(WorkerErrorKind::Callback));
         }
+        if matches!(outcome, Outcome::ResponseEncodingFailed) {
+            return Some(Err(WorkerErrorKind::FrameLimit));
+        }
         if self.exit != Some(Ok(0)) {
             return Some(Err(WorkerErrorKind::WorkerFailed));
         }
         match outcome {
             Outcome::Ok { payload } => Some(Ok(payload)),
             Outcome::CallbackFailed => unreachable!("checked above"),
+            Outcome::ResponseEncodingFailed => unreachable!("checked above"),
         }
     }
 }

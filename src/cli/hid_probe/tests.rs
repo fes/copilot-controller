@@ -498,6 +498,29 @@ fn malformed_or_forged_worker_results_fail_closed_without_echoing_payload() {
         let mut unknown = valid;
         unknown["report"]["private"] = json!(true);
         cases.push(unknown);
+        let mut limit = success(&options).payload().unwrap();
+        limit["response_limit"] = json!({
+            "omitted_fields": [], "captures_dropped": 1,
+            "inputs_dropped": 0, "serialization_failed": false,
+        });
+        // Omission metadata cannot turn incomplete export into probe success.
+        cases.push(limit.clone());
+        limit["probe_succeeded"] = json!(false);
+        limit["error"] = json!("response limit");
+        // Dropped captures require the corresponding truncation flag.
+        cases.push(limit.clone());
+        limit["report"]["capture_truncated"] = json!(true);
+        for invalid in [
+            json!({"omitted_fields": [], "captures_dropped": 129, "inputs_dropped": 0, "serialization_failed": false}),
+            json!({"omitted_fields": ["error", "error"], "captures_dropped": 1, "inputs_dropped": 0, "serialization_failed": false}),
+            json!({"omitted_fields": ["private"], "captures_dropped": 1, "inputs_dropped": 0, "serialization_failed": false}),
+            json!({"omitted_fields": [], "captures_dropped": 1, "inputs_dropped": 0}),
+            json!({"omitted_fields": [], "captures_dropped": 1, "inputs_dropped": 0, "serialization_failed": false, "private": true}),
+        ] {
+            let mut value = limit.clone();
+            value["response_limit"] = invalid;
+            cases.push(value);
+        }
         for payload in cases {
             let error = execute_with(options.clone(), |_, _| Ok(worker_result(payload)))
                 .err()
@@ -556,4 +579,264 @@ fn disabled_device_specific_features_fail_without_constructing_a_backend() {
         assert!(outcome.valid(&options));
         assert_eq!(outcome.payload().unwrap()["report"]["opened"], false);
     }
+}
+
+fn assert_bounded_response(payload: &Value) {
+    let envelope = json!({
+        "version": 1, "request_nonce": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        "worker": { "pid": u32::MAX, "creation_time_100ns": u64::MAX },
+        "outcome": { "status": "ok", "payload": payload },
+    });
+    assert!(serde_json::to_vec(&envelope).unwrap().len() <= worker::MAX_FRAME_BODY_BYTES);
+    assert!(serde_json::to_vec(payload).unwrap().len() <= worker::MAX_CALLBACK_PAYLOAD_BYTES);
+}
+
+#[test]
+fn max_size_akp03_captures_return_bounded_explicit_failure_with_whole_prefix() {
+    let options = parse(&args(&["--initialize", "--test-pattern"]), false).unwrap();
+    let original: Vec<_> = (0..128)
+        .map(|elapsed_ms| akp03::Capture {
+            elapsed_ms,
+            bytes: 512,
+            hex: "41".repeat(512),
+            decoded: Some(crate::devices::akp03::input::DecodedInput::Acknowledgment),
+            decode_error: None,
+        })
+        .collect();
+    let payload = callback_with(
+        options.payload().unwrap(),
+        false,
+        || Ok(()),
+        |options| {
+            let mut outcome = success(options);
+            let Outcome::Akp03(result) = &mut outcome else {
+                panic!("wrong kind")
+            };
+            result.report.captures = original.clone();
+            result.report.output_reports = 25;
+            result.report.output_bytes = 25 * 1025;
+            result.report.patterns_written = 6;
+            outcome
+        },
+    )
+    .unwrap();
+    assert_bounded_response(&payload);
+    let result: akp03::Akp03ProbeResult = serde_json::from_value(payload.clone()).unwrap();
+    assert!(!result.probe_succeeded);
+    assert!(!result.command_ready && !result.hardware_qualified && !result.read_only);
+    assert!(result.report.initialized && result.report.capture_truncated);
+    assert_eq!(result.report.output_reports, 25);
+    assert_eq!(result.report.output_bytes, 25 * 1025);
+    assert_eq!(result.report.patterns_written, 6);
+    let limit = result.response_limit.unwrap();
+    assert!(!limit.serialization_failed);
+    assert!(limit.captures_dropped > 0);
+    assert_eq!(limit.captures_dropped + result.report.captures.len(), 128);
+    assert_eq!(
+        result.report.captures,
+        original[..result.report.captures.len()]
+    );
+    let error = execute_with(options, |_, _| Ok(worker_result(payload.clone())))
+        .err()
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&error).unwrap(), payload);
+}
+
+#[test]
+fn oversized_micro_semantic_values_are_omitted_explicitly_after_cleanup() {
+    use crate::devices::probe_result::OmittedField;
+    let options = parse(&args(&["--query", "--read-keymap", "--test-pattern"]), true).unwrap();
+    for cleanup_succeeded in [false, true] {
+        let payload = callback_with(
+            options.payload().unwrap(),
+            true,
+            || Ok(()),
+            |options| {
+                let mut outcome = success(options);
+                let Outcome::Micro(result) = &mut outcome else {
+                    panic!("wrong kind")
+                };
+                result.report.device_status =
+                    Some(json!({"data": "s".repeat(worker::MAX_FRAME_BODY_BYTES)}));
+                result.report.keymap =
+                    Some(json!({"data": "k".repeat(worker::MAX_FRAME_BODY_BYTES)}));
+                result.report.inputs = vec![micro::ObservedInput {
+                    message: json!({"data": "i".repeat(worker::MAX_FRAME_BODY_BYTES)}),
+                    ..Default::default()
+                }];
+                result.report.led_test_attempted = true;
+                result.report.led_clear_acknowledged = cleanup_succeeded;
+                result.report.output_attempts = 12;
+                result.report.output_reports = 12;
+                result.report.output_bytes = 12 * 64;
+                if !cleanup_succeeded {
+                    result.probe_succeeded = false;
+                    result.error = Some("primary acquisition error".into());
+                    result.report.cleanup_error = Some("clear failed".into());
+                }
+                outcome
+            },
+        )
+        .unwrap();
+        assert_bounded_response(&payload);
+        let result: micro::MicroProbeResult = serde_json::from_value(payload.clone()).unwrap();
+        assert!(!result.probe_succeeded && !result.read_only);
+        assert!(!result.command_ready && !result.hardware_qualified);
+        assert!(result.report.device_status.is_none() && result.report.keymap.is_none());
+        assert!(result.report.inputs.is_empty());
+        assert!(result.report.led_test_attempted);
+        assert_eq!(result.report.led_clear_acknowledged, cleanup_succeeded);
+        assert_eq!(result.report.output_attempts, 12);
+        assert_eq!(result.report.output_reports, 12);
+        assert_eq!(result.report.output_bytes, 12 * 64);
+        if !cleanup_succeeded {
+            assert!(
+                result
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("primary acquisition error; ")
+            );
+            assert_eq!(result.report.cleanup_error.as_deref(), Some("clear failed"));
+        }
+        let limit = result.response_limit.unwrap();
+        assert!(limit.omitted_fields.contains(&OmittedField::DeviceStatus));
+        assert!(limit.omitted_fields.contains(&OmittedField::Keymap));
+        assert_eq!(limit.inputs_dropped, 1);
+        assert!(!limit.serialization_failed);
+        assert_eq!(limit.captures_dropped, 0);
+        let error = execute_with(options.clone(), |_, _| Ok(worker_result(payload.clone())))
+            .err()
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&error).unwrap(), payload);
+    }
+}
+
+#[test]
+fn bounded_micro_values_and_input_prefix_survive_an_oversized_keymap() {
+    use crate::devices::probe_result::OmittedField;
+    let options = parse(&args(&["--query", "--read-keymap"]), true).unwrap();
+    let payload = callback_with(
+        options.payload().unwrap(),
+        true,
+        || Ok(()),
+        |options| {
+            let mut outcome = success(options);
+            let Outcome::Micro(result) = &mut outcome else {
+                panic!("wrong kind")
+            };
+            result.report.device_status = Some(json!({"connected": true}));
+            result.report.keymap = Some(json!({"data": "k".repeat(worker::MAX_FRAME_BODY_BYTES)}));
+            result.report.inputs = vec![
+                micro::ObservedInput {
+                    message: json!({"AG": 1}),
+                    ..Default::default()
+                },
+                micro::ObservedInput {
+                    message: json!({"large": "i".repeat(worker::MAX_FRAME_BODY_BYTES)}),
+                    ..Default::default()
+                },
+                micro::ObservedInput {
+                    message: json!({"AG": 2}),
+                    ..Default::default()
+                },
+            ];
+            outcome
+        },
+    )
+    .unwrap();
+    assert_bounded_response(&payload);
+    assert_eq!(
+        payload["report"]["device_status"],
+        json!({"connected": true})
+    );
+    assert_eq!(payload["report"]["inputs"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["report"]["inputs"][0]["message"], json!({"AG": 1}));
+    assert_eq!(payload["response_limit"]["inputs_dropped"], 2);
+    assert_eq!(
+        payload["response_limit"]["omitted_fields"],
+        json!([OmittedField::Keymap])
+    );
+}
+
+#[test]
+fn huge_diagnostic_strings_have_a_compact_failure_retaining_write_and_cleanup_flags() {
+    let options = parse(&args(&["--query", "--test-pattern"]), true).unwrap();
+    let payload = callback_with(
+        options.payload().unwrap(),
+        true,
+        || Ok(()),
+        |options| {
+            let mut outcome = success(options);
+            let Outcome::Micro(result) = &mut outcome else {
+                panic!("wrong kind")
+            };
+            result.probe_succeeded = false;
+            result.error = Some("e".repeat(worker::MAX_FRAME_BODY_BYTES));
+            result.report.firmware = Some("f".repeat(worker::MAX_FRAME_BODY_BYTES));
+            result.report.cleanup_error = Some("c".repeat(worker::MAX_FRAME_BODY_BYTES));
+            result.report.led_test_attempted = true;
+            result.report.led_clear_acknowledged = false;
+            result.report.output_attempts = 1;
+            result.report.output_reports = 1;
+            result.report.output_bytes = 64;
+            outcome
+        },
+    )
+    .unwrap();
+    assert_bounded_response(&payload);
+    assert_eq!(payload["probe_succeeded"], false);
+    assert_eq!(payload["report"]["phase"], "response_limit");
+    assert_eq!(payload["report"]["output_bytes"], 64);
+    assert_eq!(payload["report"]["led_test_attempted"], true);
+    assert_eq!(payload["report"]["led_clear_acknowledged"], false);
+    assert!(
+        payload["report"]["cleanup_error"]
+            .as_str()
+            .unwrap()
+            .contains("omitted")
+    );
+    assert!(payload["report"]["firmware"].is_null());
+}
+
+#[test]
+fn compact_scalar_fallback_preserves_bounded_primary_and_cleanup_errors() {
+    use crate::devices::probe_result::OmittedField;
+    let options = parse(&args(&["--query", "--test-pattern"]), true).unwrap();
+    let payload = callback_with(
+        options.payload().unwrap(),
+        true,
+        || Ok(()),
+        |options| {
+            let mut outcome = success(options);
+            let Outcome::Micro(result) = &mut outcome else {
+                panic!("wrong kind")
+            };
+            result.probe_succeeded = false;
+            result.error = Some("primary failure".into());
+            result.report.cleanup_error = Some("cleanup failure".into());
+            result.report.firmware = Some("f".repeat(worker::MAX_FRAME_BODY_BYTES));
+            result.report.led_test_attempted = true;
+            outcome
+        },
+    )
+    .unwrap();
+    assert_bounded_response(&payload);
+    assert!(
+        payload["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("primary failure; ")
+    );
+    assert_eq!(payload["report"]["cleanup_error"], "cleanup failure");
+    let limit: crate::devices::probe_result::ResponseLimit =
+        serde_json::from_value(payload["response_limit"].clone()).unwrap();
+    assert!(limit.omitted_fields.contains(&OmittedField::Firmware));
+    assert!(!limit.omitted_fields.contains(&OmittedField::Error));
+    assert!(!limit.omitted_fields.contains(&OmittedField::CleanupError));
+    assert!(!limit.serialization_failed);
+    let error = execute_with(options, |_, _| Ok(worker_result(payload.clone())))
+        .err()
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&error).unwrap(), payload);
 }

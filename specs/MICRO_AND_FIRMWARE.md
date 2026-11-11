@@ -576,6 +576,10 @@ Outcome:
 - `read_only`: exactly `report.output_attempts == 0`.
 - `report`: Progress.
 - `error`: string/null.
+- `response_limit`: null normally; otherwise an explicit export-budget failure
+  record containing `omitted_fields` (fixed field names), `captures_dropped`,
+  `inputs_dropped` (nonnegative integers), and `serialization_failed` (boolean).
+  This field is required even when null. Unknown/missing record fields fail.
 
 Progress fields:
 
@@ -680,7 +684,31 @@ outcome schema above, with failed reports on stderr and nonzero CLI status.
 Worker failures use `status: worker_error`; no partial success JSON is printed.
 Existing shared supervision can additionally wait up to five seconds for exit
 and one second for I/O joining after failure; unresolved cleanup fences reuse.
-Results exceeding the existing 65536-byte worker frame limit fail closed.
+The result policy runs **after** all native sequencing and attempted LED
+cleanup. It measures compact serialized bytes without building unbounded output.
+Payloads must fit 65280 bytes, reserving 256 bytes within the unchanged 65536-byte
+frame for the envelope and maximal worker identity. If the original outcome
+cannot fit, set `probe_succeeded=false`, append an explicit response-limit error,
+and populate `response_limit`; bounded native primary/cleanup errors, counts and
+LED attempt/acknowledgment flags remain intact.
+
+Rebuilding reserves another 1024 bytes for omission metadata. Preserve whole
+status then whole keymap values when each fits; otherwise export null and list
+`device_status`/`keymap` in `omitted_fields`. Then retain complete observed-input
+and raw-capture prefixes in that order, recording exact omitted row counts.
+Never clip JSON values, messages or hex strings; a non-fitting input terminates
+the retained prefix. Dropped captures also set `capture_truncated=true`.
+This is a failed diagnostic export, not successful full observation.
+
+If scalar text or serialization prevents even that report from fitting, a
+compact typed failure retains numeric progress and write/cleanup flags, records
+omitted descriptive fields (`firmware`, `candidate`, `phase`, `error`,
+`cleanup_error` as applicable), and uses phase `response_limit`. Primary errors
+over 4096 bytes are explicitly omitted; normal bounded primary errors are
+preserved with the limit error appended. No new I/O or cleanup is attempted by
+result budgeting. The shared frame encoder also returns a correlated compact
+`response_encoding_failed` outcome if serialization/frame encoding fails;
+the coordinator reports `frame_limit` rather than unexplained EOF.
 
 `--health-check` bypasses backend construction and all device I/O in the child.
 On platforms without this Windows supervisor it returns only the pure health

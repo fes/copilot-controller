@@ -56,10 +56,17 @@ allowlist, and bounded encoding before platform dispatch. Non-Windows returns
 Frames use one 65,536-byte-maximum JSON body and require EOF; stderr is
 discarded with a 16,384-byte limit. Duplicate JSON object keys (including inside
 generic payloads) fail as `protocol` before callback dispatch.
+Responses are completely encoded before stdout is written. Serialization/frame
+failure produces a compact correlated `response_encoding_failed` frame, mapped
+to `frame_limit`, instead of disappearing as EOF. It does not imply zero device
+writes. Device callbacks use the 65,280-byte payload budget and explicit
+post-cleanup omission metadata; the 65,536-byte frame bound is unchanged.
 
-The controller executable's static registry contains `health` and
-`ct_serial_probe`. This explicitly combined `diagnostic_allowlist()` is distinct
-from the original health-only `health_allowlist()`, which rejects CT requests.
+The controller executable's static registry contains `health`, `ct_serial_probe`,
+`micro_hid_probe`, and `akp03_hid_probe`. This explicitly combined
+`diagnostic_allowlist()` is distinct from the original health-only
+`health_allowlist()`, which rejects device requests. HID coordinators use
+kind-only registries; the named AKP03 hidden route shares the same supervisor.
 Only explicit `ct-probe` launches the latter kind; its typed §6
 options cannot choose a port, path, command or selector. The worker callback
 owns the native CT transport and returns only validated report/failure data.

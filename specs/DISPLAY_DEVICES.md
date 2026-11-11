@@ -1156,7 +1156,10 @@ capture+15,000 ms, health-check timeout 3,000 ms. Kill/reap stuck child. This is
 liveness containment, not a terminal-action security sandbox.
 
 Outcome: `probe_succeeded`, `command_ready=false`, `read_only=!initialize`,
-progress report, optional textual error. Reject unknown outcome fields.
+progress report, optional textual error, and required `response_limit` (null
+normally). A nonnull response-limit record has `omitted_fields`, nonnegative
+`captures_dropped`/`inputs_dropped`, and boolean `serialization_failed`. Reject
+unknown/missing outcome and limit-record fields.
 Supervisor rejects command-ready true or more than 128 captures; it does not
 independently validate every progress field.
 
@@ -1198,9 +1201,24 @@ the required native interface number/raw descriptor and therefore fails closed
 before reports. macOS live CLI probes remain unavailable and macOS native writes
 remain disabled because no bounded diagnostic worker is integrated.
 Existing failure cleanup may additionally wait up to five seconds for exit and
-one for I/O joining; unconfirmed cleanup fences replacement. Raw captures can
-exceed the existing 65536-byte frame limit and then fail closed, never truncate
-JSON into success. No Windows runtime or physical input/display acceptance is
+one for I/O joining; unconfirmed cleanup fences replacement.
+
+Result budgeting occurs only after native acquisition/output finishes. Compact
+payloads are limited to 65280 bytes, leaving 256 bytes inside the unchanged
+65536-byte frame for envelope/identity. Oversize results become explicit failures
+with `response_limit`, never EOF or silent success. Rebuild with another 1024
+bytes reserved for limit metadata and retain a prefix of complete captures;
+never clip raw hex or decoded records. Set `capture_truncated`, record the exact
+`captures_dropped` count, and keep initialization/output/pattern accounting.
+Native primary errors up to 4096 bytes remain, followed by the response-limit
+error; oversized text is explicitly listed as omitted. If needed, a compact
+typed failure omits candidate/phase/error text with metadata while retaining all
+numeric progress and initialized flags. `inputs_dropped` is always zero for
+AKP03. A response-limit record cannot claim probe success.
+
+The shared encoder has a correlated `response_encoding_failed` fallback on
+serialization/frame errors, mapped to `frame_limit` after supervised exit.
+No Windows runtime or physical input/display acceptance is
 claimed. Initialized output may leave brightness/display changed after release.
 
 ## 10. Offline control-map export

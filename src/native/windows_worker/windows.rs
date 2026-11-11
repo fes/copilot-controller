@@ -732,12 +732,7 @@ pub(super) fn worker_main(allowlist: &DiagnosticAllowlist) -> Result<(), WorkerE
             .find(&envelope.request.kind)
             .ok_or(Kind::InvalidRequest)?;
         let outcome = protocol::invoke_callback(callback, envelope.request.payload);
-        let frame = protocol::encode_frame(&ResponseEnvelope {
-            version: protocol::VERSION,
-            request_nonce: envelope.request_nonce,
-            worker,
-            outcome,
-        })?;
+        let frame = protocol::encode_response(&outcome, envelope.request_nonce, worker)?;
         stdout.write_all(&frame).map_err(|_| Kind::Transport)?;
         Ok(())
     };

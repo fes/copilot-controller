@@ -1,5 +1,7 @@
 //! Explicit HID diagnostics; native access stays inside the contained worker.
 
+mod result;
+
 use std::{sync::atomic::AtomicBool, time::Duration};
 
 use serde::Serialize;
@@ -77,6 +79,15 @@ enum Outcome {
     Akp03(akp03::Akp03ProbeResult),
 }
 
+impl Serialize for Outcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Micro(result) => result.serialize(serializer),
+            Self::Akp03(result) => result.serialize(serializer),
+        }
+    }
+}
+
 impl Outcome {
     fn valid(&self, options: &Options) -> bool {
         match (self, options) {
@@ -87,6 +98,14 @@ impl Outcome {
                     && result.report.captures.len() <= 128
                     && result.report.inputs.len() <= 128
                     && result.probe_succeeded == result.error.is_none()
+                    && Self::valid_limit(
+                        result.response_limit.as_ref(),
+                        result.probe_succeeded,
+                        result.report.capture_truncated,
+                        result.report.captures.len(),
+                        result.report.inputs.len(),
+                        true,
+                    )
                     && (!options.health_check || *result == micro::micro_health_check())
             }
             (Self::Akp03(result), Options::Akp03(options)) => {
@@ -95,10 +114,57 @@ impl Outcome {
                     && result.read_only == !options.initialize
                     && result.report.captures.len() <= 128
                     && result.probe_succeeded == result.error.is_none()
+                    && Self::valid_limit(
+                        result.response_limit.as_ref(),
+                        result.probe_succeeded,
+                        result.report.capture_truncated,
+                        result.report.captures.len(),
+                        0,
+                        false,
+                    )
                     && (!options.health_check || *result == akp03::akp03_health_check())
             }
             _ => false,
         }
+    }
+
+    fn valid_limit(
+        limit: Option<&crate::devices::probe_result::ResponseLimit>,
+        succeeded: bool,
+        truncated: bool,
+        captures: usize,
+        inputs: usize,
+        micro: bool,
+    ) -> bool {
+        use crate::devices::probe_result::OmittedField;
+        limit.is_none_or(|limit| {
+            !succeeded
+                && limit
+                    .captures_dropped
+                    .checked_add(captures)
+                    .is_some_and(|count| count <= 128)
+                && limit
+                    .inputs_dropped
+                    .checked_add(inputs)
+                    .is_some_and(|count| count <= 128)
+                && (limit.captures_dropped == 0 || truncated)
+                && (micro || limit.inputs_dropped == 0)
+                && limit.omitted_fields.len() <= 7
+                && limit
+                    .omitted_fields
+                    .iter()
+                    .enumerate()
+                    .all(|(index, field)| {
+                        !limit.omitted_fields[..index].contains(field)
+                            && (micro
+                                || matches!(
+                                    field,
+                                    OmittedField::Candidate
+                                        | OmittedField::Phase
+                                        | OmittedField::Error
+                                ))
+                    })
+        })
     }
 
     fn succeeded(&self) -> bool {
@@ -236,6 +302,7 @@ fn valid_wire_shape(payload: &Value, options: &Options) -> bool {
     let report = &payload["report"];
     payload.is_object()
         && report.is_object()
+        && nullable_object(&payload["response_limit"])
         && nullable_object(&report["candidate"])
         && report["captures"].as_array().is_some_and(|captures| {
             captures.iter().all(|capture| {
@@ -333,9 +400,8 @@ fn callback_with(
     if !outcome.valid(&options) {
         return Err(worker::DiagnosticCallbackError);
     }
-    outcome
-        .payload()
-        .map_err(|_| worker::DiagnosticCallbackError)
+    // Result budgeting is after the entire native run, including LED cleanup.
+    result::bounded_payload(outcome).map_err(|_| worker::DiagnosticCallbackError)
 }
 
 fn unavailable(options: &Options, error: String) -> Outcome {
