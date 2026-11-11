@@ -7,7 +7,7 @@ use copilot_controller::{cli, native::windows_worker};
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let allowlist = match cli::health_allowlist() {
+    let allowlist = match cli::diagnostic_allowlist() {
         Ok(value) => value,
         Err(error) => return failure(error),
     };

@@ -156,7 +156,74 @@ pub(super) fn read_frame<R: Read, T: DeserializeOwned>(
             Err(_) => return Err(WorkerErrorKind::Transport),
         }
     }
+    // Value discards duplicate object keys. Reject them while the framed bytes
+    // still exist, before typed callback validation can authorize device I/O.
+    serde_json::from_slice::<UniqueKeys>(&body).map_err(|_| WorkerErrorKind::Protocol)?;
     serde_json::from_slice(&body).map_err(|_| WorkerErrorKind::Protocol)
+}
+
+#[cfg(any(windows, test))]
+struct UniqueKeys;
+
+#[cfg(any(windows, test))]
+impl<'de> Deserialize<'de> for UniqueKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = UniqueKeys;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("JSON without duplicate object keys")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<UniqueKeys, M::Error> {
+                let mut keys = std::collections::BTreeSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !keys.insert(key) {
+                        return Err(serde::de::Error::custom("duplicate object key"));
+                    }
+                    map.next_value::<UniqueKeys>()?;
+                }
+                Ok(UniqueKeys)
+            }
+
+            fn visit_seq<S: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: S,
+            ) -> Result<UniqueKeys, S::Error> {
+                while sequence.next_element::<UniqueKeys>()?.is_some() {}
+                Ok(UniqueKeys)
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<UniqueKeys, E> {
+                Ok(UniqueKeys)
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<UniqueKeys, E> {
+                Ok(UniqueKeys)
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<UniqueKeys, E> {
+                Ok(UniqueKeys)
+            }
+
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<UniqueKeys, E> {
+                Ok(UniqueKeys)
+            }
+
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<UniqueKeys, E> {
+                Ok(UniqueKeys)
+            }
+
+            fn visit_unit<E: serde::de::Error>(self) -> Result<UniqueKeys, E> {
+                Ok(UniqueKeys)
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 #[cfg(any(windows, test))]

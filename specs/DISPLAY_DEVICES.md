@@ -667,6 +667,44 @@ fields and accept no arbitrary port, command, file, label or persistent setting.
 Invalid options produce no I/O. Deadlines use injected monotonic elapsed time;
 clock regression fails. Cancellation is a one-way shared flag.
 
+### Explicit CLI integration
+
+`ct-probe` accepts only `--schema-version`, `--total-timeout-ms`,
+`--io-timeout-ms`, `--capture-ms`, `--max-events`, and
+`--max-received-bytes`, each followed by an unsigned ASCII decimal value, plus
+the valueless `--test-pattern` opt-in flag. Defaults and cross-field bounds are
+the table above. Unknown, repeated, missing-value and invalid options fail before
+worker launch; arbitrary ports, commands, paths and selectors are not accepted.
+Neither `doctor` nor inventory invokes this route.
+
+The coordinator and hidden worker share a compiled static allowlist containing
+`health` and `ct_serial_probe`. CT's callback validates the object payload before
+calling `devices::ct::probe::run_native`; only the contained disposable Windows
+worker owns native serial handles, overlapped storage and the mutex. The callback
+also checks detached, one-process kill-on-close Job containment using the existing
+health diagnostic before native access, refusing a direct uncontained hidden
+worker invocation even with valid options. Both sides
+validate typed reports/failures, fixed privacy-safe strings, qualification and
+request-specific bounds. Framed JSON rejects duplicate keys before conversion
+to a generic value. No vendor executable, dependency or device code is used.
+
+Supervision allows `total_timeout_ms + 500 + min(io_timeout_ms,250) + 500
++ 1000` milliseconds: the session, terminal cancellation grace, separate close,
+its possible terminal grace, and a bounded startup/response/exit allowance.
+This is at most 10250 ms, not an unlimited native-driver wait. Existing worker
+failure cleanup can additionally wait up to 5 seconds for exit and 1 second for
+I/O joining; unresolved cleanup retains its existing fail-closed fence.
+
+A successful CLI report has `command_ready: false` and a typed `ct_probe` report.
+Native failures travel inside the worker's correlated transport payload as
+`status: probe_error` and become nonzero CLI failures, not successful empty
+reports. Worker failures (including non-Windows `unsupported_platform`) have
+`status: worker_error`. Errors go only to stderr; no success JSON is printed.
+Options failures have `status: probe_error`, kind `invalid_options`, stage
+`options` and no progress. The private `__probe-worker` route never falls through
+to ordinary command execution. Windows cross-compilation does not verify real
+worker containment, driver cancellation or physical hardware acceptance.
+
 ### Windows selection and serial setup
 
 Native diagnostics require a disposable contained helper. Other OSes fail as

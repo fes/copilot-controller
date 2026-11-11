@@ -1,5 +1,7 @@
 //! Offline command parsing and execution. Parsing completes before stdin, file
-//! mutation, or the sole contained health-worker route is considered.
+//! mutation, or an explicit contained diagnostic-worker route is considered.
+
+mod ct_probe;
 
 use std::{
     io::Read,
@@ -46,9 +48,14 @@ Usage: copilot-controller <command>
   micro-firmware-plan --image <absolute-file> --esptool <absolute-file>
                       (offline pinned-file validation; micro-firmware feature)
   probe-health (contained Windows worker only)
+  ct-probe [--schema-version 1] [--total-timeout-ms <1000..8000>]
+           [--io-timeout-ms <100..1500>] [--capture-ms <0..5000>]
+           [--max-events <1..128>] [--max-received-bytes <256..32768>]
+           [--test-pattern] (explicit contained Windows serial diagnostic)
 
-All previews are synthetic and not ready. Hardware/native probe and firmware
-execution routes are unavailable. Doctor observes the native clock and read-only
+All previews are synthetic and not ready. CT is the only native hardware CLI
+probe; display writes require --test-pattern. Other hardware probes and firmware
+execution are unavailable. Doctor observes the native clock and read-only
 process/desktop metadata where supported; it never discovers or opens devices.
 No runtime or terminal actions are exposed.";
 
@@ -78,6 +85,7 @@ pub enum Command {
         report: Vec<u8>,
     },
     Health,
+    CtProbe(crate::devices::ct::probe::Options),
     FirmwarePlan {
         image: PathBuf,
         tool: PathBuf,
@@ -230,6 +238,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "device-preview" => return preview(args),
         "device-assign" => return assignment(args),
         "micro-decode" => return micro_reports(args),
+        "ct-probe" => return ct_probe::parse(args).map(Command::CtProbe),
         "micro-firmware-plan" => {
             let mut image = None;
             let mut tool = None;
@@ -302,9 +311,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             svg: true,
         }),
         "probe-health" => Ok(Command::Health),
-        "micro-probe" | "akp03-probe" | "ct-probe" => {
-            Ok(Command::Unavailable("hardware probe backend"))
-        }
+        "micro-probe" | "akp03-probe" => Ok(Command::Unavailable("hardware probe backend")),
         "micro-firmware-update" => Ok(Command::Unavailable("firmware CLI/native backend")),
         _ => Err("unsupported command; no action-delivery interface is available".into()),
     }
@@ -329,7 +336,11 @@ fn profile_report(device: DeviceKind) -> Value {
         "prioritized_roles": profile.prioritized_controls(),
         "command_ready": false,
         "runtime_qualified": false,
-        "blockers": ["native_backend_unavailable", "physical_acceptance_pending",
+        "blockers": [if device == DeviceKind::Ct && cfg!(windows) {
+                        "explicit_probe_required"
+                    } else {
+                        "native_backend_unavailable"
+                    }, "physical_acceptance_pending",
                      "independent_action_authority_required"],
     })
 }
@@ -342,7 +353,8 @@ fn capabilities() -> Value {
         "qualification": "foundation_only",
         "inventory": portable_inventory(),
         "offline_codecs": ["micro", "akp03-original", "akp03e-rev2", "ct-pid-0003"],
-        "hardware_backend_available": false,
+        "hardware_backend_available": cfg!(windows),
+        "ct_serial_probe_available": cfg!(windows),
         "firmware_execution_available": false,
         "runtime_owner_acquired": false,
         "state_store_api_available": cfg!(any(target_os = "linux", target_os = "macos")),
@@ -352,7 +364,7 @@ fn capabilities() -> Value {
             "micro_hid": cfg!(feature = "micro-hid"),
             "micro_firmware": cfg!(feature = "micro-firmware"),
         },
-        "limitations": ["Build features do not supply native device backends or qualification."],
+        "limitations": ["CT CLI probing requires explicit opt-in and a contained Windows worker; no probe supplies action readiness or physical qualification."],
     })
 }
 
@@ -369,8 +381,9 @@ fn export(candidate: &CandidateAssignment, path: PathBuf) -> Result<(), String> 
 }
 
 /// Execute an already validated offline route. Only assignment reads stdin,
-/// only confirmed assignment export mutates files, and only health launches
-/// a compiled-in contained diagnostic worker (on Windows).
+/// only confirmed assignment export mutates files. Health and CT launch
+/// compiled-in contained diagnostic workers (on Windows); CT display writes
+/// require the explicit test-pattern option.
 pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
     match command {
         Command::Help => Ok(Output::Text(HELP.into())),
@@ -437,7 +450,7 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
                 "inventory": portable_inventory(),
                 "limitations": ["No device discovery/opening, worker launch, provider calls or terminal actions.",
                     "Windows basename hints use copilot.exe and WindowsTerminal.exe; they are not authenticated host identities.",
-                    "Hardware backends, host authentication, lifecycle subscriptions and physical acceptance are unavailable.",
+                    "Hardware qualification, host authentication, lifecycle subscriptions and physical acceptance are unavailable.",
                     "State/recovery and shared-owner APIs are library-only; this command acquires no owner lease."],
             })))
         }
@@ -517,6 +530,7 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
                 "worker": result.worker, "health": result.payload,
             })))
         }
+        Command::CtProbe(options) => ct_probe::execute(options),
         Command::FirmwarePlan { image, tool } => {
             if !cfg!(feature = "micro-firmware") {
                 return Err(
@@ -533,11 +547,19 @@ pub fn execute(command: Command, input: impl Read) -> Result<Output, String> {
     }
 }
 
-static HEALTH_CALLBACKS: [worker::DiagnosticCallback; 1] =
-    [worker::DiagnosticCallback::new("health", health_callback)];
+static DIAGNOSTIC_CALLBACKS: [worker::DiagnosticCallback; 2] = [
+    worker::DiagnosticCallback::new("health", health_callback),
+    worker::DiagnosticCallback::new(ct_probe::KIND, ct_probe::callback),
+];
 
+/// Shared static registry for the coordinator and hidden worker.
+pub fn diagnostic_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
+    worker::DiagnosticAllowlist::new(&DIAGNOSTIC_CALLBACKS).map_err(|error| error.to_string())
+}
+
+/// Retained for callers of the original health route.
 pub fn health_allowlist() -> Result<worker::DiagnosticAllowlist, String> {
-    worker::DiagnosticAllowlist::new(&HEALTH_CALLBACKS).map_err(|error| error.to_string())
+    diagnostic_allowlist()
 }
 
 fn health_callback(payload: Value) -> Result<Value, worker::DiagnosticCallbackError> {

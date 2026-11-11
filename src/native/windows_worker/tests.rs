@@ -113,6 +113,50 @@ fn frame_handles_one_byte_reads_and_exact_eof() {
 }
 
 #[test]
+fn duplicate_keys_are_rejected_before_callback_payload_becomes_value() {
+    for body in [
+        br#"{"kind":"ct_serial_probe","payload":{"capture_ms":0,"capture_ms":1}}"#.as_slice(),
+        br#"{"payload":{"capture_ms":0,"capture_\u006ds":1}}"#,
+        br#"{"payload":[{"schema_version":1,"schema_version":2}]}"#,
+        br#"{"outcome":{"status":"report","report":{"pattern":"not_requested","pattern":"private"}}}"#,
+    ] {
+        assert_eq!(
+            protocol::read_frame::<_, Value>(&mut Cursor::new(frame(body))),
+            Err(WorkerErrorKind::Protocol),
+        );
+    }
+    let body =
+        br#"{"payload":[null,true,false,-1,1.25,184467440737095516160,"text",{"capture_ms":0}]}"#;
+    let decoded = protocol::read_frame::<_, Value>(&mut Cursor::new(frame(body))).unwrap();
+    assert_eq!(decoded, serde_json::from_slice::<Value>(body).unwrap());
+}
+
+#[test]
+fn production_ct_callback_is_allowlisted_and_invalid_payload_is_not_success_shaped() {
+    let registry = crate::cli::diagnostic_allowlist().unwrap();
+    let callback = registry
+        .find("ct_serial_probe")
+        .expect("static CT callback");
+    let request = RequestEnvelope {
+        version: VERSION,
+        request_nonce: nonce(),
+        request: DiagnosticRequest {
+            kind: "ct_serial_probe".into(),
+            payload: json!({"port": "COM1"}),
+        },
+    };
+    protocol::validate_request(&request, &registry).unwrap();
+    // Invalid options stop before containment checks or native device access.
+    let outcome = protocol::invoke_callback(callback, request.request.payload);
+    assert!(matches!(outcome, Outcome::CallbackFailed));
+    assert_eq!(
+        serde_json::to_value(outcome).unwrap(),
+        json!({"status": "callback_failed"})
+    );
+    assert!(registry.find("command").is_none());
+}
+
+#[test]
 fn frame_limits_and_truncation_are_distinct() {
     for length in [0_u32, 65_537, u32::MAX] {
         assert_eq!(

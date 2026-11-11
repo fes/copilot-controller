@@ -40,7 +40,8 @@ fn json_result(args: &[&str]) -> Value {
 #[test]
 fn inventory_and_doctor_are_truthful_and_never_action_ready() {
     let capabilities = json_result(&["capabilities"]);
-    assert_eq!(capabilities["hardware_backend_available"], false);
+    assert_eq!(capabilities["hardware_backend_available"], cfg!(windows));
+    assert_eq!(capabilities["ct_serial_probe_available"], cfg!(windows));
     assert_eq!(capabilities["firmware_execution_available"], false);
     assert_eq!(capabilities["runtime_owner_acquired"], false);
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -190,12 +191,7 @@ fn validation_errors_and_live_routes_have_no_success_output() {
         assert!(output.stdout.is_empty(), "{args:?}");
         assert!(!output.stderr.is_empty(), "{args:?}");
     }
-    for command in [
-        "micro-probe",
-        "akp03-probe",
-        "ct-probe",
-        "micro-firmware-update",
-    ] {
+    for command in ["micro-probe", "akp03-probe", "micro-firmware-update"] {
         let output = invoke(&[command]);
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
@@ -214,6 +210,33 @@ fn validation_errors_and_live_routes_have_no_success_output() {
                 .unwrap()
                 .contains("unavailable")
         );
+    }
+}
+
+#[test]
+fn ct_validation_and_hidden_worker_never_emit_success_output() {
+    for args in [
+        vec!["ct-probe", "--port", "COM1"],
+        vec!["ct-probe", "--capture-ms", "0", "--capture-ms", "1"],
+        vec!["ct-probe", "--test-pattern", "--command", "anything"],
+        vec!["ct-probe", "--schema-version", "2"],
+        vec!["__probe-worker"],
+        vec!["__probe-worker", "extra"],
+    ] {
+        let output = invoke(&args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(!output.stderr.is_empty(), "{args:?}");
+    }
+    #[cfg(not(windows))]
+    {
+        let output = invoke(&["ct-probe", "--capture-ms", "0"]);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["status"], "worker_error");
+        assert_eq!(error["error"]["kind"], "unsupported_platform");
+        assert!(error["error"]["worker"].is_null());
     }
 }
 

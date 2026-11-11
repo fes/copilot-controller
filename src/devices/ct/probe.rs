@@ -13,7 +13,7 @@ use crate::native::windows_observation::{
 
 use super::protocol::{FrameDecoder, InputEvent, decode_input};
 
-const UPGRADE: &[u8] =
+pub(crate) const UPGRADE: &[u8] =
     b"GET /index.html\nHTTP/1.1\nConnection: Upgrade\nUpgrade: websocket\nSec-WebSocket-Key: 123abc\n\n";
 const CLOSE: &[u8] = &[0x88, 0x80, 0, 0, 0, 0];
 
@@ -1795,7 +1795,6 @@ pub fn run_native(_options: Options, _cancelled: &AtomicBool) -> Result<ProbeRep
 mod windows_native;
 
 #[cfg(windows)]
-#[allow(dead_code)]
 pub(crate) fn run_native(
     options: Options,
     cancelled: &AtomicBool,

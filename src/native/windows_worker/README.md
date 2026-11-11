@@ -54,7 +54,17 @@ Admission checks the 1 ms–120 s timeout, prelaunch cancellation, request and
 allowlist, and bounded encoding before platform dispatch. Non-Windows returns
 `unsupported_platform` after those checks without invoking a callback.
 Frames use one 65,536-byte-maximum JSON body and require EOF; stderr is
-discarded with a 16,384-byte limit.
+discarded with a 16,384-byte limit. Duplicate JSON object keys (including inside
+generic payloads) fail as `protocol` before callback dispatch.
+
+The controller executable's static registry contains `health` and
+`ct_serial_probe`. Only explicit `ct-probe` launches the latter; its typed §6
+options cannot choose a port, path, command or selector. The worker callback
+owns the native CT transport and returns only validated report/failure data.
+The coordinator treats a transported CT failure as a nonzero CLI error even
+when the framing/worker transport itself completed successfully. See
+`specs/DISPLAY_DEVICES.md` §6 for CLI flags and the <=10.25-second supervision
+budget (session plus cancellation/close grace and bounded response allowance).
 
 On Windows the service creates private standard pipes with noninheritable
 parent ends, enables inheritance only for child ends, restricts the inheritance
