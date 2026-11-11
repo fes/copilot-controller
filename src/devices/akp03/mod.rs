@@ -9,6 +9,7 @@ pub mod image;
 pub mod input;
 pub mod layout;
 pub mod output;
+pub mod probe;
 pub mod profile;
 
 pub use profile::Profile;

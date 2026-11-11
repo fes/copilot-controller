@@ -186,6 +186,29 @@ impl RpcClient {
         self.feed_object(JsonObject::from_map(object))
     }
 
+    /// Parses an unsolicited report while no RPC is pending and queues only input
+    /// notifications. This is used by fixed-interval probe drains.
+    pub fn feed_observation_report(
+        &mut self,
+        report: &[u8],
+        now: Duration,
+    ) -> Result<(), MicroError> {
+        let Some(object) = self.decoder.feed(report, now)? else {
+            return Ok(());
+        };
+        let object = object.as_map();
+        if matches!(
+            object.get("m").and_then(Value::as_str),
+            Some("v.oai.hid" | "v.oai.rad" | "kb.radial")
+        ) {
+            if self.inputs.len() == INPUT_QUEUE_CAPACITY {
+                return Err(MicroError::InputOverflow);
+            }
+            self.inputs.push_back(JsonObject::from_map(object.clone()));
+        }
+        Ok(())
+    }
+
     fn feed_object(&mut self, mut object: JsonObject) -> Result<Option<JsonValue>, MicroError> {
         let pending = self.pending.as_ref().ok_or(MicroError::NoPendingRequest)?;
         if pending.deadline.is_none() {
@@ -222,6 +245,27 @@ impl RpcClient {
 
     pub fn queued_input_count(&self) -> usize {
         self.inputs.len()
+    }
+
+    pub fn next_request_id(&self) -> Option<u64> {
+        self.next_id
+    }
+
+    /// Abandons only the current RPC exchange while retaining framing, input,
+    /// and request-sequence state for a bounded diagnostic cleanup attempt.
+    pub fn abandon_pending(&mut self) {
+        self.pending = None;
+    }
+
+    pub fn read_time_remaining(&self, now: Duration) -> Result<Duration, MicroError> {
+        let pending = self.pending.as_ref().ok_or(MicroError::NoPendingRequest)?;
+        let deadline = pending.deadline.ok_or(MicroError::WritesIncomplete)?;
+        if now >= deadline {
+            return Err(MicroError::ResponseTimeout {
+                method: pending.method.clone(),
+            });
+        }
+        Ok(deadline - now)
     }
 
     pub fn decoder(&self) -> &Decoder {

@@ -16,6 +16,7 @@ pub struct FakeState {
     /// Count reported back from `read`, overriding the true length.
     pub read_count: Option<usize>,
     pub writes_unsupported: bool,
+    pub report_descriptor: Option<Vec<u8>>,
 }
 
 pub struct FakeBackend {
@@ -75,5 +76,15 @@ impl HidTransport for FakeTransport {
         let n = r.len().min(buf.len());
         buf[..n].copy_from_slice(&r[..n]);
         Ok(s.read_count.unwrap_or(n))
+    }
+
+    fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        self.0
+            .borrow()
+            .report_descriptor
+            .clone()
+            .ok_or(HidError::EvidenceUnavailable(
+                EvidenceKind::RawReportDescriptor,
+            ))
     }
 }

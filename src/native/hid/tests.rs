@@ -15,6 +15,8 @@ fn desc(id: HidIdentity, page: u16, path: &str) -> HidDescriptor {
         serial: None,
         max_input_report_len: 64,
         max_output_report_len: 32,
+        interface_number: None,
+        bus: None,
         path: HidPath::new(path).unwrap(),
     }
 }
@@ -146,6 +148,29 @@ fn read_bounds() {
     b.state.borrow_mut().inputs.push_back(vec![1, 2]);
     b.state.borrow_mut().read_count = Some(9);
     assert!(matches!(dev.read_report(8, t), Err(HidError::Protocol(_))));
+}
+
+#[test]
+fn original_report_descriptor_is_bounded_and_fail_closed_when_missing() {
+    let d = desc(ID, 1, "descriptor");
+    let b = FakeBackend::new(vec![d.clone()]);
+    let mut device = HidDevice::open(&b, &d).unwrap();
+    assert_eq!(
+        device.report_descriptor(),
+        Err(HidError::EvidenceUnavailable(
+            EvidenceKind::RawReportDescriptor
+        ))
+    );
+
+    b.state.borrow_mut().report_descriptor = Some(vec![0x06; 54]);
+    let mut device = HidDevice::open(&b, &d).unwrap();
+    assert_eq!(device.report_descriptor().unwrap(), vec![0x06; 54]);
+    b.state.borrow_mut().report_descriptor = Some(vec![0x06; MAX_REPORT_DESCRIPTOR_LEN + 1]);
+    let mut device = HidDevice::open(&b, &d).unwrap();
+    assert!(matches!(
+        device.report_descriptor(),
+        Err(HidError::Protocol(_))
+    ));
 }
 
 #[test]

@@ -14,6 +14,12 @@
 //! disposable, supervised worker process that can be killed; this module does not
 //! provide a bounded live probe.
 //!
+//! The Windows backend currently cannot supply a native interface number or the
+//! original HID report descriptor. The macOS backend reads those only from native
+//! properties when available. Consumers requiring either artifact fail closed
+//! with [`HidError::EvidenceUnavailable`] rather than infer it from parsed caps or
+//! a device path.
+//!
 //! A successful transport call is not device qualification or action readiness.
 
 use std::fmt;
@@ -36,12 +42,14 @@ mod iokit;
 mod win32;
 
 #[cfg(test)]
-mod fake;
+pub(crate) mod fake;
 #[cfg(test)]
 mod tests;
 
 /// Largest report (including any report-ID byte) accepted or returned.
-pub const MAX_REPORT_LEN: usize = 1024;
+pub const MAX_REPORT_LEN: usize = 1025;
+/// Largest original HID report descriptor accepted by the evidence boundary.
+pub const MAX_REPORT_DESCRIPTOR_LEN: usize = 1024;
 /// Largest number of descriptors a single enumeration may return.
 pub const MAX_ENUMERATED_DEVICES: usize = 64;
 /// Longest accepted read timeout.
@@ -54,6 +62,20 @@ pub const MAX_METADATA_LEN: usize = 512;
 pub struct HidIdentity {
     pub vendor_id: u16,
     pub product_id: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvidenceKind {
+    InterfaceNumber,
+    BusClassification,
+    RawReportDescriptor,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HidBus {
+    Usb,
+    Bluetooth,
+    Unknown,
 }
 
 /// Opaque backend-specific device location. Never parsed by callers.
@@ -87,6 +109,10 @@ pub struct HidDescriptor {
     pub max_input_report_len: usize,
     /// Maximum output report size in bytes, including the report-ID byte; 0 if unknown.
     pub max_output_report_len: usize,
+    /// Exact native interface number when the OS exposes it; never inferred from a path.
+    pub interface_number: Option<i32>,
+    /// Native bus classification; never inferred from a device path.
+    pub bus: Option<HidBus>,
     pub path: HidPath,
 }
 
@@ -154,6 +180,8 @@ pub enum HidError {
     NotFound,
     /// The OS or device returned inconsistent or oversized data.
     Protocol(&'static str),
+    /// The platform did not expose a required, non-derivable identity artifact.
+    EvidenceUnavailable(EvidenceKind),
     Timeout,
     /// OS failure with the platform's raw numeric code.
     Os {
@@ -176,6 +204,15 @@ pub trait HidBackend {
     fn enumerate(&self, matcher: &HidMatcher, limit: usize)
     -> Result<Vec<HidDescriptor>, HidError>;
     fn open(&self, descriptor: &HidDescriptor) -> Result<Box<dyn HidTransport>, HidError>;
+
+    /// Opens a composite-interface candidate whose primary usage may differ
+    /// after reopening. Implementations should preserve every other identity check.
+    fn open_allowing_usage_change(
+        &self,
+        descriptor: &HidDescriptor,
+    ) -> Result<Box<dyn HidTransport>, HidError> {
+        self.open(descriptor)
+    }
 }
 
 /// Raw report I/O. Implementations may assume arguments were bounds-checked by
@@ -188,6 +225,12 @@ pub trait HidTransport {
     fn write(&mut self, report: &[u8]) -> Result<usize, HidError>;
     /// Reads one input report into `buf`, returning its length.
     fn read(&mut self, buf: &mut [u8], timeout: Duration) -> Result<usize, HidError>;
+    /// Returns original HID report-descriptor bytes only when provided by the OS.
+    fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        Err(HidError::EvidenceUnavailable(
+            EvidenceKind::RawReportDescriptor,
+        ))
+    }
 }
 
 /// An explicitly opened device with bounds enforced on every call.
@@ -207,8 +250,29 @@ impl fmt::Debug for HidDevice {
 impl HidDevice {
     /// Explicit open. The descriptor must come from the same backend's enumeration.
     pub fn open(backend: &dyn HidBackend, descriptor: &HidDescriptor) -> Result<Self, HidError> {
+        Self::open_with(backend, descriptor, false)
+    }
+
+    /// Open a composite device while allowing its primary usage to change on
+    /// reopen; identity, path, interface, and transport must still match.
+    pub fn open_allowing_usage_change(
+        backend: &dyn HidBackend,
+        descriptor: &HidDescriptor,
+    ) -> Result<Self, HidError> {
+        Self::open_with(backend, descriptor, true)
+    }
+
+    fn open_with(
+        backend: &dyn HidBackend,
+        descriptor: &HidDescriptor,
+        allow_usage_change: bool,
+    ) -> Result<Self, HidError> {
         validate_descriptor(descriptor)?;
-        let transport = backend.open(descriptor)?;
+        let transport = if allow_usage_change {
+            backend.open_allowing_usage_change(descriptor)?
+        } else {
+            backend.open(descriptor)?
+        };
         Ok(Self {
             descriptor: descriptor.clone(),
             transport,
@@ -217,6 +281,17 @@ impl HidDevice {
 
     pub fn descriptor(&self) -> &HidDescriptor {
         &self.descriptor
+    }
+
+    /// Reads a bounded original descriptor; parsed or equivalent descriptors are not accepted.
+    pub fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        let bytes = self.transport.report_descriptor()?;
+        if bytes.is_empty() || bytes.len() > MAX_REPORT_DESCRIPTOR_LEN {
+            return Err(HidError::Protocol(
+                "report descriptor length is outside 1..=1024",
+            ));
+        }
+        Ok(bytes)
     }
 
     /// Writes one output report (first byte is the report ID, 0 if unnumbered).

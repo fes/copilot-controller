@@ -33,6 +33,9 @@ unsafe extern "C" {
     fn CFGetTypeID(cf: CFTypeRef) -> usize;
     fn CFNumberGetTypeID() -> usize;
     fn CFStringGetTypeID() -> usize;
+    fn CFDataGetTypeID() -> usize;
+    fn CFDataGetLength(data: CFTypeRef) -> CFIndex;
+    fn CFDataGetBytePtr(data: CFTypeRef) -> *const u8;
     fn CFNumberGetValue(n: CFTypeRef, ty: CFIndex, out: *mut c_void) -> u8;
     fn CFNumberCreate(a: CFTypeRef, ty: CFIndex, v: *const c_void) -> CFTypeRef;
     fn CFStringCreateWithCString(a: CFTypeRef, s: *const c_char, enc: u32) -> CFTypeRef;
@@ -231,8 +234,32 @@ fn describe(dev: CFTypeRef, identity: HidIdentity) -> Option<HidDescriptor> {
         serial: prop_string(dev, "SerialNumber"),
         max_input_report_len: size("MaxInputReportSize"),
         max_output_report_len: size("MaxOutputReportSize"),
+        interface_number: prop_i32(dev, "InterfaceNumber"),
+        bus: prop_string(dev, "Transport").map(|transport| {
+            if transport.eq_ignore_ascii_case("usb") {
+                HidBus::Usb
+            } else if transport.eq_ignore_ascii_case("bluetooth") {
+                HidBus::Bluetooth
+            } else {
+                HidBus::Unknown
+            }
+        }),
         path: HidPath::new(path_for(id)).ok()?,
     })
+}
+
+fn same_open_identity(
+    reopened: &HidDescriptor,
+    selected: &HidDescriptor,
+    allow_usage_change: bool,
+) -> bool {
+    let usage_matches = allow_usage_change
+        || (reopened.usage_page == selected.usage_page && reopened.usage == selected.usage);
+    reopened.identity == selected.identity
+        && reopened.interface_number == selected.interface_number
+        && reopened.bus == selected.bus
+        && reopened.path == selected.path
+        && usage_matches
 }
 
 impl HidBackend for IoKitHid {
@@ -258,11 +285,31 @@ impl HidBackend for IoKitHid {
     }
 
     fn open(&self, d: &HidDescriptor) -> Result<Box<dyn HidTransport>, HidError> {
+        self.open_with_policy(d, false)
+    }
+
+    fn open_allowing_usage_change(
+        &self,
+        d: &HidDescriptor,
+    ) -> Result<Box<dyn HidTransport>, HidError> {
+        self.open_with_policy(d, true)
+    }
+}
+
+impl IoKitHid {
+    fn open_with_policy(
+        &self,
+        d: &HidDescriptor,
+        allow_usage_change: bool,
+    ) -> Result<Box<dyn HidTransport>, HidError> {
         let matched = Matched::new(d.identity)?;
         let dev = matched
             .devices()?
             .into_iter()
-            .find(|&x| describe(x, d.identity).is_some_and(|c| c == *d))
+            .find(|&x| {
+                describe(x, d.identity)
+                    .is_some_and(|c| same_open_identity(&c, d, allow_usage_change))
+            })
             .ok_or(HidError::NotFound)?;
         // SAFETY: `dev` is a live element of the matched set; retained for our lifetime.
         let dev = unsafe { CFRetain(dev) };
@@ -292,11 +339,13 @@ impl HidBackend for IoKitHid {
             );
             IOHIDDeviceScheduleWithRunLoop(dev.0, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
         }
+        let report_descriptor = original_report_descriptor(dev.0);
         Ok(Box::new(MacTransport {
             dev,
             _matched: matched,
             run_loop: unsafe { CFRunLoopGetCurrent() },
             state,
+            report_descriptor,
         }))
     }
 }
@@ -346,6 +395,26 @@ struct MacTransport {
     _matched: Matched,
     run_loop: CFTypeRef,
     state: Box<InputState>,
+    report_descriptor: Option<Vec<u8>>,
+}
+
+fn original_report_descriptor(dev: CFTypeRef) -> Option<Vec<u8>> {
+    let key = cfstr("ReportDescriptor")?;
+    // SAFETY: borrowed property from a live IOHIDDevice.
+    let data = unsafe { IOHIDDeviceGetProperty(dev, key.0) };
+    if data.is_null() || unsafe { CFGetTypeID(data) != CFDataGetTypeID() } {
+        return None;
+    }
+    let len = unsafe { CFDataGetLength(data) };
+    if !(1..=1024).contains(&len) {
+        return None;
+    }
+    let ptr = unsafe { CFDataGetBytePtr(data) };
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: CFData owns `len` contiguous bytes and remains alive for this copy.
+    Some(unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec())
 }
 
 impl Drop for MacTransport {
@@ -389,5 +458,13 @@ impl HidTransport for MacTransport {
             // SAFETY: services this thread's run loop for at most `left`.
             unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, left.as_secs_f64(), 1) };
         }
+    }
+
+    fn report_descriptor(&mut self) -> Result<Vec<u8>, HidError> {
+        self.report_descriptor
+            .clone()
+            .ok_or(HidError::EvidenceUnavailable(
+                EvidenceKind::RawReportDescriptor,
+            ))
     }
 }

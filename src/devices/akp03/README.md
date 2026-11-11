@@ -19,11 +19,15 @@ from a Rust 2024 crate with `serde` 1 (the `derive` feature) and
   90 JPEG encoding, RGB-to-report composition, and upright numbered test tiles.
 * `layout`: row-major logical diagnostic positions, scoped historical revision-2
   control locations/directions, and validated preview geometry.
+* `probe`: an injected-clock HID state machine for the revision-2 diagnostic,
+  exact raw-descriptor gating, bounded capture, and synthetic transport tests.
 
 Recommendations are not active bindings. An ACK, a decoded event, generated
 reports, or matching identity/descriptor does not establish native evidence,
 display visibility, command readiness, or authorization. The shared input,
 evidence, and gesture layer must independently validate any eventual use.
 
-Native HID discovery/probing, CLI wiring, SVG previews, semantic presentation,
-and shared artwork are intentionally not implemented here.
+CLI/worker wiring, supervised process containment, SVG previews, semantic
+presentation, and shared artwork are intentionally not implemented here. Native
+AKP03 probing fails closed when the OS does not expose the exact interface number
+or original report-descriptor bytes; parsed HID caps are not a substitute.

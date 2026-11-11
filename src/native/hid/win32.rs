@@ -219,6 +219,8 @@ impl HidBackend for WindowsHid {
                 serial: string_attr(&h, HidD_GetSerialNumberString),
                 max_input_report_len: usize::from(c.InputReportByteLength),
                 max_output_report_len: usize::from(c.OutputReportByteLength),
+                interface_number: None,
+                bus: None,
                 path: HidPath::new(path)?,
             };
             if m.matches(&d) {
