@@ -5,6 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(windows)]
+use crate::native::windows_observation::Observation;
+use crate::native::windows_observation::{
+    SerialSelection, SerialSelectionState, normalize_com_port,
+};
+
 use super::protocol::{FrameDecoder, InputEvent, decode_input};
 
 const UPGRADE: &[u8] =
@@ -51,6 +57,45 @@ impl Options {
             return Err(ProbeErrorKind::InvalidOptions);
         }
         Ok(())
+    }
+}
+
+pub fn select_ct_port(selection: &SerialSelection) -> Result<String, ProbeErrorKind> {
+    match selection.state {
+        SerialSelectionState::NotFound => return Err(ProbeErrorKind::DeviceUnavailable),
+        SerialSelectionState::Incomplete => return Err(ProbeErrorKind::DiscoveryIncomplete),
+        SerialSelectionState::Ambiguous => return Err(ProbeErrorKind::AmbiguousDevice),
+        SerialSelectionState::Unique => {}
+    }
+    if selection.present_count == 0 || selection.matching_count != 1 || selection.ports.len() != 1 {
+        return Err(ProbeErrorKind::DiscoveryIncomplete);
+    }
+    let port =
+        normalize_com_port(&selection.ports[0]).ok_or(ProbeErrorKind::DiscoveryIncomplete)?;
+    let selected = normalize_com_port(
+        selection
+            .selected_port
+            .as_deref()
+            .ok_or(ProbeErrorKind::DiscoveryIncomplete)?,
+    )
+    .ok_or(ProbeErrorKind::DiscoveryIncomplete)?;
+    if port == selected {
+        Ok(port)
+    } else {
+        Err(ProbeErrorKind::DiscoveryIncomplete)
+    }
+}
+
+#[cfg(windows)]
+fn selection_error<T>(observation: Observation<T>) -> Result<T, ProbeErrorKind> {
+    match observation {
+        Observation::Observed(value) => Ok(value),
+        Observation::Unavailable(error) => Err(match error.kind {
+            crate::native::windows_observation::ErrorKind::AccessDenied => {
+                ProbeErrorKind::BusyOrDenied
+            }
+            _ => ProbeErrorKind::DiscoveryIncomplete,
+        }),
     }
 }
 
@@ -164,6 +209,10 @@ pub struct ProbeProgress {
     pub last_phase: Phase,
     pub elapsed_ms: u32,
     pub phases: Vec<PhaseProgress>,
+    #[serde(default)]
+    pub port_opened_at_ms: Option<u32>,
+    #[serde(default)]
+    pub port_configured_at_ms: Option<u32>,
     pub upgrade_request: RequestProgress,
     pub identity_request: RequestProgress,
     pub firmware_request: RequestProgress,
@@ -178,6 +227,26 @@ pub struct ProbeProgress {
     pub identity_frames_received: u32,
     pub firmware_frames_received: u32,
     pub session_close: CloseStatus,
+    #[serde(default)]
+    pub serial: Option<SerialDiagnostics>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SerialDiagnostics {
+    pub read_calls: u32,
+    pub write_calls: u32,
+    pub read_failures: u32,
+    pub write_failures: u32,
+    pub completed_read_bytes: u32,
+    pub completed_write_bytes: u32,
+    pub idle_reads: u32,
+    pub line_status_checks: u32,
+    pub line_status_failures: u32,
+    pub line_error_observations: u32,
+    pub line_error_flags: u32,
+    pub last_input_queue_bytes: Option<u32>,
+    pub last_output_queue_bytes: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -208,6 +277,8 @@ pub struct ProbeReport {
     pub identity_response_length: u8,
     pub firmware_version: [u8; 3],
     pub reply_length_disagreements: u32,
+    #[serde(default)]
+    pub serial_settings: Option<SerialSettings>,
     pub pattern: String,
     pub completion: Completion,
     pub elapsed_ms: u32,
@@ -217,6 +288,51 @@ pub struct ProbeReport {
     pub ticks: u32,
     pub inputs: Vec<InputSample>,
     pub progress: ProbeProgress,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StaticLineMode {
+    Off,
+    On,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SerialSettings {
+    pub baud_rate: u32,
+    pub data_bits: u8,
+    pub parity: String,
+    pub stop_bits: u8,
+    pub binary: bool,
+    pub flow_control: String,
+    pub nul_stripping: bool,
+    pub dtr: StaticLineMode,
+    pub rts: StaticLineMode,
+}
+
+#[cfg(any(windows, test))]
+fn static_modem_modes(bits: u32) -> Option<(StaticLineMode, StaticLineMode)> {
+    let dtr = match bits & 0x30 {
+        0 => StaticLineMode::Off,
+        0x10 => StaticLineMode::On,
+        _ => return None,
+    };
+    let rts = match bits & 0x3000 {
+        0 => StaticLineMode::Off,
+        0x1000 => StaticLineMode::On,
+        _ => return None,
+    };
+    Some((dtr, rts))
+}
+
+#[cfg(any(windows, test))]
+fn win32_error_kind(code: u32) -> ProbeErrorKind {
+    match code {
+        5 | 32 => ProbeErrorKind::BusyOrDenied,
+        1167 => ProbeErrorKind::Disconnected,
+        _ => ProbeErrorKind::NativeFailure,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,8 +352,42 @@ pub struct TransportError {
 /// transport creation; an idle read must advance it.
 pub trait Transport {
     fn now_ms(&mut self) -> u64;
-    fn write(&mut self, bytes: &[u8]) -> Result<usize, TransportError>;
-    fn read(&mut self, bytes: &mut [u8]) -> Result<ReadResult, TransportError>;
+    fn write(
+        &mut self,
+        bytes: &[u8],
+        deadline_ms: u64,
+        cancelled: &AtomicBool,
+    ) -> Result<usize, TransportError>;
+    fn read(
+        &mut self,
+        bytes: &mut [u8],
+        deadline_ms: u64,
+        cancelled: &AtomicBool,
+    ) -> Result<ReadResult, TransportError>;
+
+    fn progress_origin_ms(&self) -> Option<u64> {
+        None
+    }
+
+    fn initial_phases(&self) -> &[PhaseProgress] {
+        &[]
+    }
+
+    fn port_opened_at_ms(&self) -> Option<u32> {
+        None
+    }
+
+    fn port_configured_at_ms(&self) -> Option<u32> {
+        None
+    }
+
+    fn serial_diagnostics(&self) -> Option<SerialDiagnostics> {
+        None
+    }
+
+    fn serial_settings(&self) -> Option<SerialSettings> {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -273,6 +423,8 @@ impl Progress {
                     started_ms: 0,
                     elapsed_ms: 0,
                 }],
+                port_opened_at_ms: None,
+                port_configured_at_ms: None,
                 upgrade_request: RequestProgress {
                     written_bytes: 0,
                     total_bytes: UPGRADE.len() as u32,
@@ -299,6 +451,7 @@ impl Progress {
                 identity_frames_received: 0,
                 firmware_frames_received: 0,
                 session_close: CloseStatus::NotAttempted,
+                serial: None,
             },
             phase_started: 0,
         }
@@ -324,6 +477,18 @@ impl Progress {
             });
             self.record.last_phase = phase;
             self.phase_started = now;
+        }
+    }
+
+    fn seed(&mut self, phases: &[PhaseProgress]) {
+        for phase in phases {
+            if phase_rank(phase.phase) > phase_rank(self.record.last_phase)
+                && self.record.phases.len() < 14
+            {
+                self.record.phases.push(phase.clone());
+                self.record.last_phase = phase.phase;
+                self.phase_started = u64::from(phase.started_ms);
+            }
         }
     }
 }
@@ -404,7 +569,10 @@ impl<T: Transport> Engine<'_, T> {
                 }
                 return Err(error);
             }
-            match self.transport.write(&bytes[offset..]) {
+            match self
+                .transport
+                .write(&bytes[offset..], deadline, self.cancelled)
+            {
                 Ok(0) => {
                     self.uncertain_write = true;
                     return Err(ProbeErrorKind::ShortWrite);
@@ -446,7 +614,10 @@ impl<T: Transport> Engine<'_, T> {
         }
         let capacity = remaining.min(512);
         let mut buffer = [0_u8; 512];
-        match self.transport.read(&mut buffer[..capacity]) {
+        match self
+            .transport
+            .read(&mut buffer[..capacity], deadline, self.cancelled)
+        {
             Ok(ReadResult::Data(0)) => Err(ProbeErrorKind::TransportContract),
             Ok(ReadResult::Data(count)) if count <= capacity => {
                 let after = self.now()?;
@@ -742,13 +913,17 @@ fn run_with_evidence<T: Transport>(
         });
     }
     let start = transport.now_ms();
+    let started_at = transport.progress_origin_ms().unwrap_or(start);
+    progress.record.port_opened_at_ms = transport.port_opened_at_ms();
+    progress.record.port_configured_at_ms = transport.port_configured_at_ms();
+    progress.seed(transport.initial_phases());
     let deadline = start.saturating_add(u64::from(options.total_timeout_ms));
-    progress.phase_started = start;
+    progress.phase_started = started_at;
     let mut engine = Engine {
         transport,
         options,
         cancelled,
-        started_at: start,
+        started_at,
         clock: Clock { last: start },
         progress,
         stage: Stage::Handshake,
@@ -851,6 +1026,7 @@ fn run_with_evidence<T: Transport>(
     let primary_native_code = engine.native_code;
     let now = cleanup_now.unwrap_or(engine.clock.last);
     engine.progress.tick(engine.elapsed(now));
+    engine.progress.record.serial = engine.transport.serial_diagnostics();
     if result.is_err() && engine.upgraded {
         let skip = engine.uncertain_write
             || cancelled.load(Ordering::Acquire)
@@ -908,6 +1084,7 @@ fn run_with_evidence<T: Transport>(
             identity_response_length: identity_length,
             firmware_version: version,
             reply_length_disagreements: engine.disagreement_count,
+            serial_settings: engine.transport.serial_settings(),
             pattern: if engine.options.test_pattern {
                 "correlated_replies_only".into()
             } else {
@@ -990,7 +1167,12 @@ mod tests {
             self.now
         }
 
-        fn write(&mut self, bytes: &[u8]) -> Result<usize, TransportError> {
+        fn write(
+            &mut self,
+            bytes: &[u8],
+            _deadline_ms: u64,
+            _cancelled: &AtomicBool,
+        ) -> Result<usize, TransportError> {
             self.write_calls += 1;
             if self.fail_write_at == Some(self.write_calls) {
                 return Err(TransportError {
@@ -1008,7 +1190,12 @@ mod tests {
             Ok(count)
         }
 
-        fn read(&mut self, bytes: &mut [u8]) -> Result<ReadResult, TransportError> {
+        fn read(
+            &mut self,
+            bytes: &mut [u8],
+            _deadline_ms: u64,
+            _cancelled: &AtomicBool,
+        ) -> Result<ReadResult, TransportError> {
             self.read_calls += 1;
             if let Some(front) = self.reads.front_mut() {
                 let count = front.len().min(bytes.len());
@@ -1034,6 +1221,88 @@ mod tests {
         let mut bytes = vec![0x82, payload.len() as u8];
         bytes.extend_from_slice(payload);
         bytes
+    }
+
+    fn selection(
+        state: SerialSelectionState,
+        present_count: usize,
+        ports: &[&str],
+        selected: Option<&str>,
+    ) -> SerialSelection {
+        SerialSelection {
+            state,
+            present_count,
+            matching_count: ports.len(),
+            ports: ports.iter().map(|port| (*port).to_owned()).collect(),
+            selected_port: selected.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn ct_port_selection_requires_one_present_normalized_association() {
+        assert_eq!(
+            select_ct_port(&selection(
+                SerialSelectionState::Unique,
+                1,
+                &["com7"],
+                Some("COM7")
+            ))
+            .unwrap(),
+            "COM7"
+        );
+        assert_eq!(
+            select_ct_port(&selection(SerialSelectionState::NotFound, 1, &[], None)),
+            Err(ProbeErrorKind::DeviceUnavailable)
+        );
+        assert_eq!(
+            select_ct_port(&selection(
+                SerialSelectionState::Unique,
+                1,
+                &["COM7"],
+                Some("COM8")
+            )),
+            Err(ProbeErrorKind::DiscoveryIncomplete)
+        );
+        assert_eq!(
+            select_ct_port(&selection(
+                SerialSelectionState::Unique,
+                0,
+                &["COM7"],
+                Some("COM7")
+            )),
+            Err(ProbeErrorKind::DiscoveryIncomplete)
+        );
+        assert_eq!(
+            select_ct_port(&selection(
+                SerialSelectionState::Unique,
+                1,
+                &["COM0"],
+                Some("COM0")
+            )),
+            Err(ProbeErrorKind::DiscoveryIncomplete)
+        );
+    }
+
+    #[test]
+    fn modem_lines_accept_only_static_off_or_on_modes() {
+        assert_eq!(
+            static_modem_modes(0),
+            Some((StaticLineMode::Off, StaticLineMode::Off))
+        );
+        assert_eq!(
+            static_modem_modes(0x1010),
+            Some((StaticLineMode::On, StaticLineMode::On))
+        );
+        assert_eq!(static_modem_modes(0x20), None);
+        assert_eq!(static_modem_modes(0x2000), None);
+    }
+
+    #[test]
+    fn native_error_mapping_is_typed_and_redacted() {
+        assert_eq!(win32_error_kind(5), ProbeErrorKind::BusyOrDenied);
+        assert_eq!(win32_error_kind(32), ProbeErrorKind::BusyOrDenied);
+        assert_eq!(win32_error_kind(1167), ProbeErrorKind::Disconnected);
+        assert_eq!(win32_error_kind(12345), ProbeErrorKind::NativeFailure);
     }
 
     fn valid_reads() -> Vec<Vec<u8>> {
@@ -1505,6 +1774,7 @@ pub fn run_native(_options: Options, _cancelled: &AtomicBool) -> Result<ProbeRep
             progress: Box::new(progress),
         });
     }
+
     if _cancelled.load(Ordering::Acquire) {
         return Err(ProbeFailure {
             kind: ProbeErrorKind::Cancelled,
@@ -1519,4 +1789,16 @@ pub fn run_native(_options: Options, _cancelled: &AtomicBool) -> Result<ProbeRep
         native_code: None,
         progress: Box::new(progress),
     })
+}
+
+#[cfg(windows)]
+mod windows_native;
+
+#[cfg(windows)]
+#[allow(dead_code)]
+pub(crate) fn run_native(
+    options: Options,
+    cancelled: &AtomicBool,
+) -> Result<ProbeReport, ProbeFailure> {
+    windows_native::run_native(options, cancelled)
 }
