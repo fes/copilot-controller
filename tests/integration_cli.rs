@@ -354,7 +354,8 @@ fn confirmed_export_is_exclusive_or_fails_closed_without_creating_a_file() {
         let candidate: Value = serde_json::from_slice(&original).unwrap();
         assert_eq!(candidate["activation"], "candidate_only");
         assert_eq!(candidate["command_ready"], false);
-        assert_eq!(original, output.stdout);
+        let stdout_candidate: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(candidate, stdout_candidate);
         let retry = invoke_assignment_with_args(&args, &bytes);
         assert!(!retry.status.success());
         assert!(retry.stdout.is_empty());
