@@ -65,8 +65,8 @@ Each support entry is one of:
 | Durable action-writer quiescence | Unavailable | Unavailable | Unavailable | Unavailable |
 | Process/window/desktop/serial observations | Implemented | Unsupported | Unsupported | Unsupported |
 | Explicit process/UI/console qualification probes | Implemented | Unsupported | Unsupported | Unsupported |
-| Framed, Job-contained diagnostic workers | Implemented | Unsupported | Unsupported | Unsupported |
-| Framed, process-group HID/health workers | Unsupported | Unsupported | Compiled ARM64 | Unsupported |
+| Framed, Job-contained diagnostic workers | Implemented; private live-HID scope | Unsupported | Unsupported | Unsupported |
+| Framed HID/health workers | Job-contained; optional HID metadata, live probes fail closed | Unsupported | Process-group, compiled ARM64 | Unsupported |
 
 Clock prerequisites: nonnil runtime epoch, same native source, same boot.
 
@@ -152,26 +152,43 @@ by an in-process fallback or a guaranteed per-call timeout.
 
 | Artifact | Native source and exact acceptance | Remaining limitation |
 |---|---|---|
-| Bus | `SetupDiGetDeviceInterfaceDetailW` supplies the collection's `SP_DEVINFO_DATA`; `SetupDiGetDevicePropertyW(DEVPKEY_Device_BusTypeGuid)` must succeed with exactly `DEVPROP_TYPE_GUID` and 16 bytes. Only `GUID_BUS_TYPE_USB` (`9d7debbc-c85d-11d1-9eb4-006008c3a19a`, Wdmguid.h) maps to USB. Other valid GUIDs map to `Unknown`; missing/error/wrong type/size maps to unavailable. | No parent traversal or string/path/usage inference. A HID bus or Bluetooth setup-class/interface GUID does not prove the physical transport. Bluetooth classification is not implemented without a documented bus-GUID contract. |
+| Bus | `SetupDiGetDeviceInterfaceDetailW` supplies the collection's `SP_DEVINFO_DATA.DevInst`; `CM_Get_DevNode_PropertyW(DEVPKEY_Device_BusTypeGuid)` must succeed with exactly `DEVPROP_TYPE_GUID` and 16 bytes. An exact `GUID_BUS_TYPE_HID` permits `CM_Get_Parent` traversal, bounded to 16 nodes. At the first non-HID bus, only `GUID_BUS_TYPE_USB` (`9d7debbc-c85d-11d1-9eb4-006008c3a19a`, Wdmguid.h) maps to USB. Other valid GUIDs map to `Unknown`; an explicitly missing property remains unavailable and stops traversal. | The collection may report only a logical HID bus. Never search past an unknown/missing transport for USB ancestry (for example a Bluetooth adapter); no string/path/hardware-ID/usage inference. Wrong type/size, transient property/parent failures, cycles and walk-cap exhaustion abort enumeration/open. Bluetooth classification is not implemented without a documented bus-GUID contract. |
 | Interface number | Unavailable (`None`). | No documented exact `bInterfaceNumber` source was confirmed for this user-mode collection path. Do not parse `mi_` or inspect `HIDP_CAPS` reserved fields. |
 | Original report descriptor | `EvidenceUnavailable(RawReportDescriptor)`, without issuing a descriptor IOCTL. | Microsoft lists `IOCTL_HID_GET_REPORT_DESCRIPTOR` under **HID Minidriver IOCTLs**, sent only by HIDClass to minidrivers, not by user-mode applications to collection handles. `IRP_MJ_DEVICE_CONTROL` on the individual IOCTL page does not change this contract. Collection-descriptor/preparsed-data APIs return parsed data, not the original bytes; reconstruction is prohibited. |
 
 Bus reads use a fixed 16-byte buffer, never an allocation or retry based on an
-untrusted required size. SetupAPI scans at most 4096 interfaces, caps each
+untrusted required size. The entire observed devnode/GUID ancestry prefix is
+retained. `CR_NO_SUCH_VALUE` is explicit missing-property evidence, not a
+transient failure and not permission to walk farther. Other CM failures,
+including a disappeared devnode/parent, retain their raw `CONFIGRET` code in
+`HidError::Os` with the enumeration/open operation. SetupAPI/file failures retain
+Win32 codes; failed `HidP_GetCaps` retains its signed native status.
+SetupAPI scans at most 4096 interfaces, caps each
 detail buffer at 4096 bytes and validates a terminated UTF-16 path within the
-returned extent and the 512-byte metadata limit. At most 64 enumerated
+returned extent and the 512-byte metadata limit. Only `ERROR_NO_MORE_ITEMS`
+completes a scan normally; every other enumeration/detail error or reaching
+the scan cap fails closed, never returning a partial/false-unique inventory.
+An unresolved matching-VID/PID candidate's open, attributes, caps or bus read
+failure also aborts the inventory rather than hiding another device.
+Explicitly missing bus properties retain the candidate with unavailable bus
+metadata; they do not drop it. At most 64 enumerated
 candidates retain evidence. Opening requires the same backend's retained
 descriptor, then re-reads attributes/caps/strings on the opened handle and
-re-resolves that exact collection path through SetupAPI for the same bus
-property. Any identity, report-size, optional metadata or raw GUID mismatch
-fails closed, even when both GUIDs would classify as `Unknown`. Composite
+re-resolves that exact collection path through SetupAPI for the same bounded
+CM ancestry/property walk. Any identity, report-size, optional metadata,
+devnode ancestry or raw GUID mismatch fails closed, even when both GUIDs
+would classify as `Unknown`. Native read failures are preserved rather than
+collapsed into `NotFound`. Composite
 reopen may change only primary usage; all other checks remain.
 These are post-open observations, not an atomic PnP/physical identity guarantee.
+USB classification is available only when the exact native walk reaches the
+USB bus; it is not a claim that collection properties yield USB in practice.
 
 Micro/AKP03 still fail closed at the missing interface gate before transport
 open/report I/O. Optional metadata does not promise successful Windows live
 probing or physical qualification. Fake API-seam tests cover property
-type/size/value failures, exact GUID revalidation and scoped authority.
+type/size/value and transient failures, bounded ancestry, incomplete scans,
+exact ancestry/GUID revalidation and scoped authority.
 Exact/empty/oversized descriptor tests exercise the shared injectable transport
 boundary (1..=1024 bytes); they do not demonstrate Windows raw-descriptor
 retrieval. No hardware or Windows runtime acceptance is claimed.
@@ -182,7 +199,9 @@ Official contracts:
 [report-descriptor IOCTL](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/hidport/ni-hidport-ioctl_hid_get_report_descriptor),
 [BusTypeGuid](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/devpkey-device-bustypeguid),
 [bus GUID definition contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/irp-mn-query-bus-information),
-[SetupDiGetDevicePropertyW](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupdigetdevicepropertyw),
+[CM_Get_DevNode_PropertyW](https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_devnode_propertyw),
+[CM_Get_Parent](https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_parent),
+[SetupDiEnumDeviceInterfaces](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupdienumdeviceinterfaces),
 [SetupDiGetDeviceInterfaceDetailW](https://learn.microsoft.com/en-us/windows/win32/api/setupapi/nf-setupapi-setupdigetdeviceinterfacedetailw).
 
 ## 3. Shared observation and error contracts
@@ -677,7 +696,8 @@ Console HWND can be message-only under pseudo-console hosting and is not a termi
 
 ### 8.1 Admission
 
-Launch only current executable with hidden argument **`__probe-worker`**, no shell and no caller-selected executable.
+Launch only current executable with hidden argument **`__probe-worker`**, or
+the fixed AKP03-only **`__akp03-worker`** route, no shell and no caller-selected executable.
 
 Public request:
 
@@ -697,7 +717,14 @@ Timeout **1ms through120s inclusive**. Check order:
 4. Bounded encoding.
 5. Platform dispatch.
 
-Windows uses the Job service below. macOS ARM64 additionally admits only health,
+Windows uses the Job service below. Its child issues private, thread-bound,
+per-request HID authority only after validating the complete typed Micro/AKP03
+options, the entire frame/EOF and allowlist, and the detached one-process,
+no-breakaway, kill-on-close Job. Health, other kinds and in-process callers
+receive no HID authority; native access and stale scopes are checked as in
+§2.5. Optional bounded native ancestry metadata does not make Windows live
+probes available: interface-number/raw-descriptor gates still fail closed.
+macOS ARM64 additionally admits only health,
 Micro and AKP03 requests (§8.7), validating complete typed HID options before
 spawn. Other non-Windows targets return unsupported-platform after these checks
 without invoking callbacks. CT remains Windows-only.
@@ -946,8 +973,14 @@ after SIGINT/SIGKILL of the parent, and exercise held pipes and truncated
 response headers/bodies. No hardware was accessed.
 IOKit property/descriptor and physical input/output behavior remain unverified.
 Standalone doctor discovery remains unavailable; diagnostic metadata is obtained
-only inside the explicit HID probe child. Windows Job behavior and its existing
-evidence/runtime limitations are unchanged.
+only inside the explicit HID probe child. Windows uses the separate Job
+service, not this process-group block. Its HID backend now requires the
+private validated live-child scope described in §2.5/§8.1, retains bounded
+native bus ancestry and rejects incomplete enumeration. The underlying Job
+lifetime/cleanup service remains as specified above; Windows interface numbers
+and original report descriptors remain unavailable, so live probes fail
+closed before transport open/report I/O. Windows runtime/physical acceptance
+is still unverified.
 
 ## 9. Portable bounded stdio diagnostics
 

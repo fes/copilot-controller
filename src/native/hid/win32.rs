@@ -8,10 +8,11 @@ use std::ptr::{null, null_mut};
 use std::time::Duration;
 
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-    DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO, SP_DEVICE_INTERFACE_DATA,
-    SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA, SetupDiCreateDeviceInfoList,
-    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
-    SetupDiGetDeviceInterfaceDetailW, SetupDiGetDevicePropertyW, SetupDiOpenDeviceInterfaceW,
+    CM_Get_DevNode_PropertyW, CM_Get_Parent, CR_NO_SUCH_VALUE, CR_SUCCESS, DIGCF_DEVICEINTERFACE,
+    DIGCF_PRESENT, HDEVINFO, SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+    SP_DEVINFO_DATA, SetupDiCreateDeviceInfoList, SetupDiDestroyDeviceInfoList,
+    SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+    SetupDiOpenDeviceInterfaceW,
 };
 use windows_sys::Win32::Devices::HumanInterfaceDevice::{
     HIDD_ATTRIBUTES, HIDP_CAPS, HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetHidGuid,
@@ -30,7 +31,9 @@ use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 use super::platform::parse_vid_pid;
-use super::win32_evidence::{BusEvidence, WindowsEvidence, revalidate_open};
+use super::win32_evidence::{
+    BusApi, BusEvidence, WindowsEvidence, collect_candidates, revalidate_open, scan_interfaces,
+};
 use super::*;
 use crate::native::windows_worker::{HidWorkerCapability, hid_worker_capability};
 
@@ -74,7 +77,7 @@ fn wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
 
-fn open_handle(path: &str, access: u32, flags: u32) -> Option<Handle> {
+fn open_handle(path: &str, access: u32, flags: u32, op: HidOp) -> Result<Handle, HidError> {
     let w = wide(path);
     // SAFETY: `w` is NUL-terminated and outlives the call.
     let h = unsafe {
@@ -88,10 +91,14 @@ fn open_handle(path: &str, access: u32, flags: u32) -> Option<Handle> {
             null_mut(),
         )
     };
-    (h != INVALID_HANDLE_VALUE).then_some(Handle(h))
+    if h == INVALID_HANDLE_VALUE {
+        Err(os_err(op))
+    } else {
+        Ok(Handle(h))
+    }
 }
 
-fn attributes(h: &Handle) -> Option<HidIdentity> {
+fn attributes(h: &Handle, op: HidOp) -> Result<HidIdentity, HidError> {
     let mut a = HIDD_ATTRIBUTES {
         Size: size_of::<HIDD_ATTRIBUTES>() as u32,
         VendorID: 0,
@@ -99,24 +106,34 @@ fn attributes(h: &Handle) -> Option<HidIdentity> {
         VersionNumber: 0,
     };
     // SAFETY: `a` is a valid, correctly sized out-structure.
-    unsafe { HidD_GetAttributes(h.0, &mut a) }.then_some(HidIdentity {
+    if !unsafe { HidD_GetAttributes(h.0, &mut a) } {
+        return Err(os_err(op));
+    }
+    Ok(HidIdentity {
         vendor_id: a.VendorID,
         product_id: a.ProductID,
     })
 }
 
-fn caps(h: &Handle) -> Option<HIDP_CAPS> {
+fn caps(h: &Handle, op: HidOp) -> Result<HIDP_CAPS, HidError> {
     let mut pre = 0isize;
     // SAFETY: out-pointer is valid; the preparsed data is freed below on every path.
     if !unsafe { HidD_GetPreparsedData(h.0, &mut pre) } {
-        return None;
+        return Err(os_err(op));
     }
     let mut c = HIDP_CAPS::default();
     // SAFETY: `pre` is valid preparsed data and `c` a valid out-structure.
     let st = unsafe { HidP_GetCaps(pre, &mut c) };
     // SAFETY: `pre` came from HidD_GetPreparsedData and is not used afterwards.
     unsafe { HidD_FreePreparsedData(pre) };
-    (st == HIDP_STATUS_SUCCESS).then_some(c)
+    if st == HIDP_STATUS_SUCCESS {
+        Ok(c)
+    } else {
+        Err(HidError::Os {
+            op,
+            code: i64::from(st),
+        })
+    }
 }
 
 fn string_attr(
@@ -133,43 +150,79 @@ fn string_attr(
     (!s.is_empty()).then_some(s)
 }
 
-fn bus_evidence(set: &DevInfo, device: &SP_DEVINFO_DATA) -> BusEvidence {
-    BusEvidence::read(|buffer| {
+struct NativeBusApi {
+    op: HidOp,
+}
+
+impl BusApi for NativeBusApi {
+    fn property(
+        &mut self,
+        node: u32,
+        buffer: &mut [u8; 16],
+    ) -> Result<Option<(u32, usize)>, HidError> {
         let mut ty = 0;
-        let mut required = 0;
-        // SAFETY: device belongs to set; the fixed GUID-sized buffer is the
+        let mut len = buffer.len() as u32;
+        // SAFETY: node came from SetupAPI/CM_Get_Parent and is local. The buffer is the
         // entire writable extent. No retry/allocation follows a larger size.
-        let ok = unsafe {
-            SetupDiGetDevicePropertyW(
-                set.0,
-                device,
+        let status = unsafe {
+            CM_Get_DevNode_PropertyW(
+                node,
                 &DEVPKEY_Device_BusTypeGuid,
                 &mut ty,
                 buffer.as_mut_ptr(),
-                buffer.len() as u32,
-                &mut required,
+                &mut len,
                 0,
             )
         };
-        (ok != 0).then_some((ty, required as usize))
-    })
+        match status {
+            CR_SUCCESS => Ok(Some((ty, len as usize))),
+            CR_NO_SUCH_VALUE => Ok(None),
+            code => Err(HidError::Os {
+                op: self.op,
+                code: i64::from(code),
+            }),
+        }
+    }
+
+    fn parent(&mut self, node: u32) -> Result<u32, HidError> {
+        let mut parent = 0;
+        // SAFETY: node is a local DEVINST; valid out-pointer, reserved flags zero.
+        let status = unsafe { CM_Get_Parent(&mut parent, node, 0) };
+        if status != CR_SUCCESS {
+            return Err(HidError::Os {
+                op: self.op,
+                code: i64::from(status),
+            });
+        }
+        Ok(parent)
+    }
+}
+
+fn bus_evidence(device: &SP_DEVINFO_DATA, op: HidOp) -> Result<BusEvidence, HidError> {
+    BusEvidence::read(device.DevInst, &mut NativeBusApi { op })
 }
 
 fn interface_detail(
     set: &DevInfo,
     interface: &SP_DEVICE_INTERFACE_DATA,
-) -> Option<(HidPath, SP_DEVINFO_DATA)> {
+    op: HidOp,
+) -> Result<(HidPath, SP_DEVINFO_DATA), HidError> {
     let mut needed = 0;
     // SAFETY: size query with a null buffer.
     let ok = unsafe {
         SetupDiGetDeviceInterfaceDetailW(set.0, interface, null_mut(), 0, &mut needed, null_mut())
     };
-    if ok != 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
-        return None;
+    if ok != 0 {
+        return Err(HidError::Protocol(
+            "HID detail size query unexpectedly succeeded",
+        ));
+    }
+    if unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        return Err(os_err(op));
     }
     let needed = needed as usize;
     if !(size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>()..=4096).contains(&needed) {
-        return None;
+        return Err(HidError::Protocol("HID detail size outside bounds"));
     }
     let mut buf = vec![0u32; needed.div_ceil(4)];
     let detail = buf.as_mut_ptr().cast::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>();
@@ -192,23 +245,28 @@ fn interface_detail(
     };
     let returned = returned as usize;
     let offset = core::mem::offset_of!(SP_DEVICE_INTERFACE_DETAIL_DATA_W, DevicePath);
-    if ok == 0
-        || returned > needed
-        || returned < offset + 2
-        || !(returned - offset).is_multiple_of(2)
-    {
-        return None;
+    if ok == 0 {
+        return Err(os_err(op));
+    }
+    if returned > needed || returned < offset + 2 || !(returned - offset).is_multiple_of(2) {
+        return Err(HidError::Protocol("invalid HID detail length"));
     }
     // SAFETY: the slice stays inside the successfully returned buffer extent.
     let path_ptr = unsafe { core::ptr::addr_of!((*detail).DevicePath) }.cast::<u16>();
     let slice = unsafe { core::slice::from_raw_parts(path_ptr, (returned - offset) / 2) };
-    let end = slice.iter().position(|&c| c == 0)?;
-    let path = HidPath::new(String::from_utf16(&slice[..end]).ok()?).ok()?;
-    Some((path, device))
+    let end = slice
+        .iter()
+        .position(|&c| c == 0)
+        .ok_or(HidError::Protocol("unterminated HID interface path"))?;
+    let path = HidPath::new(
+        String::from_utf16(&slice[..end])
+            .map_err(|_| HidError::Protocol("invalid HID interface path UTF-16"))?,
+    )?;
+    Ok((path, device))
 }
 
 struct Interfaces {
-    set: DevInfo,
+    _set: DevInfo,
     entries: Vec<(HidPath, SP_DEVINFO_DATA)>,
 }
 
@@ -234,19 +292,19 @@ fn interface_paths() -> Result<Interfaces, HidError> {
         return Err(os_err(HidOp::Enumerate));
     }
     let set = DevInfo(set);
-    let mut out = Vec::new();
-    for index in 0..4096 {
-        let mut ifd: SP_DEVICE_INTERFACE_DATA = unsafe { core::mem::zeroed() };
-        ifd.cbSize = size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
-        // SAFETY: `ifd` is initialised with cbSize as required.
-        if unsafe { SetupDiEnumDeviceInterfaces(set.0, null(), &guid, index, &mut ifd) } == 0 {
-            break;
-        }
-        if let Some(entry) = interface_detail(&set, &ifd) {
-            out.push(entry);
-        }
-    }
-    Ok(Interfaces { set, entries: out })
+    let entries = scan_interfaces(
+        |index| {
+            let mut ifd: SP_DEVICE_INTERFACE_DATA = unsafe { core::mem::zeroed() };
+            ifd.cbSize = size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
+            // SAFETY: `ifd` is initialised with cbSize as required.
+            if unsafe { SetupDiEnumDeviceInterfaces(set.0, null(), &guid, index, &mut ifd) } == 0 {
+                return Err(unsafe { GetLastError() });
+            }
+            Ok(ifd)
+        },
+        |ifd| interface_detail(&set, &ifd, HidOp::Enumerate),
+    )?;
+    Ok(Interfaces { _set: set, entries })
 }
 
 fn reopened_bus(path: &HidPath) -> Result<BusEvidence, HidError> {
@@ -262,19 +320,24 @@ fn reopened_bus(path: &HidPath) -> Result<BusEvidence, HidError> {
     interface.cbSize = size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
     // SAFETY: bounded, NUL-terminated path; valid set and out-structure.
     if unsafe { SetupDiOpenDeviceInterfaceW(set.0, path_wide.as_ptr(), 0, &mut interface) } == 0 {
-        return Err(HidError::NotFound);
+        return Err(os_err(HidOp::Open));
     }
-    let (actual_path, device) = interface_detail(&set, &interface).ok_or(HidError::NotFound)?;
+    let (actual_path, device) = interface_detail(&set, &interface, HidOp::Open)?;
     if actual_path != *path {
         return Err(HidError::NotFound);
     }
-    Ok(bus_evidence(&set, &device))
+    bus_evidence(&device, HidOp::Open)
 }
 
-fn describe(h: &Handle, path: HidPath, bus: BusEvidence) -> Option<WindowsEvidence> {
-    let identity = attributes(h)?;
-    let c = caps(h)?;
-    Some(WindowsEvidence {
+fn describe(
+    h: &Handle,
+    path: HidPath,
+    bus: BusEvidence,
+    identity: HidIdentity,
+    op: HidOp,
+) -> Result<WindowsEvidence, HidError> {
+    let c = caps(h, op)?;
+    Ok(WindowsEvidence {
         descriptor: HidDescriptor {
             identity,
             usage_page: c.UsagePage,
@@ -319,10 +382,16 @@ impl WindowsHid {
             d.path.as_str(),
             GENERIC_READ | GENERIC_WRITE,
             FILE_FLAG_OVERLAPPED,
-        )
-        .ok_or_else(|| os_err(HidOp::Open))?;
+            HidOp::Open,
+        )?;
         revalidate_open(&expected, allow_usage_change, || {
-            describe(&h, d.path.clone(), reopened_bus(&d.path)?).ok_or(HidError::NotFound)
+            describe(
+                &h,
+                d.path.clone(),
+                reopened_bus(&d.path)?,
+                attributes(&h, HidOp::Open)?,
+                HidOp::Open,
+            )
         })?;
         Ok(Box::new(WinTransport {
             h,
@@ -341,33 +410,30 @@ impl HidBackend for WindowsHid {
             return Err(HidError::InvalidArgument(ArgumentError::LimitInvalid));
         }
         let interfaces = interface_paths()?;
-        let mut found = Vec::new();
-        let mut evidence = Vec::new();
-        for (path, device) in interfaces.entries {
+        let evidence = collect_candidates(interfaces.entries, m, limit, |(path, device)| {
             // Only paths whose name carries the requested identity are touched.
             if parse_vid_pid(path.as_str()) != Some(m.identity) {
-                continue;
+                return Ok(None);
             }
             // Access mask 0 queries attributes without read/write access.
-            let Some(h) = open_handle(path.as_str(), 0, 0) else {
-                continue;
-            };
-            if attributes(&h) != Some(m.identity) {
-                continue;
+            let h = open_handle(path.as_str(), 0, 0, HidOp::Enumerate)?;
+            let identity = attributes(&h, HidOp::Enumerate)?;
+            if identity != m.identity {
+                return Ok(None);
             }
-            let Some(entry) = describe(&h, path, bus_evidence(&interfaces.set, &device)) else {
-                continue;
-            };
-            let d = &entry.descriptor;
-            if m.matches(d) {
-                validate_descriptor(d)?;
-                if found.len() == limit {
-                    return Err(HidError::TooManyDevices);
-                }
-                found.push(d.clone());
-                evidence.push(entry);
-            }
-        }
+            describe(
+                &h,
+                path,
+                bus_evidence(&device, HidOp::Enumerate)?,
+                identity,
+                HidOp::Enumerate,
+            )
+            .map(Some)
+        })?;
+        let found = evidence
+            .iter()
+            .map(|entry| entry.descriptor.clone())
+            .collect();
         *self.enumerated.borrow_mut() = evidence;
         Ok(found)
     }

@@ -16,7 +16,8 @@
 //! disposable, supervised worker process that can be killed; this module does not
 //! provide a bounded live probe.
 //!
-//! Windows reads bus evidence from the collection's native BusTypeGuid property,
+//! Windows reads typed BusTypeGuid evidence with a bounded native parent walk
+//! across exact logical HID bus nodes (never past unknown/missing transport),
 //! but cannot supply a documented native interface number or original report
 //! descriptor (the report-descriptor IOCTL is for HID minidrivers, not applications).
 //! The macOS backend reads those only from native properties when available.

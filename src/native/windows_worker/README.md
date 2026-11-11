@@ -95,7 +95,10 @@ private thread-bound, per-request capability. The worker issues it only after
 complete typed Micro/AKP03 option validation for a live (not health) callback
 and detached one-process/no-breakaway/kill-on-close Job validation. Health,
 other callback kinds, ordinary in-process callers and expired scopes cannot
-access HID. Optional exact collection BusTypeGuid metadata is available;
+access HID. Optional exact BusTypeGuid metadata uses a bounded native parent
+walk only across logical HID bus nodes; it stops at missing/unknown transport.
+Incomplete scans or unresolved matching candidates fail closed rather than
+returning false-unique inventories. Native ancestry is revalidated after open;
 interface numbers and original report descriptors remain unavailable, so
 Micro/AKP03 still fail closed before transport open/report I/O. In particular,
 `IOCTL_HID_GET_REPORT_DESCRIPTOR` is a minidriver request, not a supported

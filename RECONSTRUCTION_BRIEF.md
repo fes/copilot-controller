@@ -141,9 +141,11 @@ health workers run on Windows/macOS ARM64. Explicit `ct-probe`, `micro-probe`, a
 supervisor, with static kind-only HID authority and validated options/results.
 Micro/AKP03 `--health-check` uses pure no-I/O reports on other platforms and
 requires no HID feature. Live HID probing requires the device-specific feature
-and native descriptor evidence. Windows exposes optional collection BusTypeGuid
-metadata (only a documented USB bus GUID is classified), but exact interface
-numbers and original report descriptors remain unavailable, so live probes
+and native descriptor evidence. Windows exposes optional BusTypeGuid metadata
+through a bounded native parent walk across exact logical HID bus nodes
+(only a documented USB bus GUID is classified; missing/unknown transport stops
+the walk). Incomplete enumeration or unresolved matching candidates fail closed.
+Exact interface numbers and original report descriptors remain unavailable, so live probes
 fail closed. Windows HID access requires a private, scoped contained-child
 capability; there is no in-process fallback. See platform appendix §2.5 for
 the supported API contract and residual evidence gaps.

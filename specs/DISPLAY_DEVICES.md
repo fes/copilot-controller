@@ -1198,8 +1198,11 @@ progress field. Failed reports go to stderr with nonzero CLI status.
 Health uses no backend/transport and requires no feature. Where there is no
 Windows/macOS ARM64 supervisor, only this pure no-I/O report runs in-process; live access
 has no fallback. Native probes require `akp03-hid`. Windows can read optional
-exact BusTypeGuid metadata (only the documented USB bus GUID is classified),
-but the required native interface number/raw descriptor remain unavailable,
+exact BusTypeGuid metadata through a bounded native parent walk across logical
+HID buses (missing/unknown transport stops the walk; only the documented USB
+bus GUID is classified). Incomplete scans or unresolved matching candidates
+fail closed, not false-unique.
+The required native interface number/raw descriptor remain unavailable,
 so it fails closed before transport open/reports. The raw-descriptor IOCTL
 is HID minidriver traffic, not a supported user-mode collection request.
 Windows HID access requires a private scoped contained-child capability and
