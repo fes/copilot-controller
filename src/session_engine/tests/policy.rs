@@ -738,3 +738,102 @@ fn p03_accept_request_token_cooldown_and_six_session_capacity() {
         Err(R::Disabled)
     );
 }
+
+#[test]
+fn p03_accept_capacity_fails_closed_without_evicting_live_suppression() {
+    const CAPACITY: u8 = 64;
+
+    let mut reservations = Reservations::default();
+    for token in 0..CAPACITY {
+        assert_eq!(
+            reserve(
+                &mut reservations,
+                Action::Accept,
+                1,
+                clock(0, 10),
+                1,
+                50,
+                token
+            ),
+            Ok(())
+        );
+    }
+
+    for pending in 1_000..2_000 {
+        assert_eq!(
+            reserve(
+                &mut reservations,
+                Action::Accept,
+                1,
+                clock(0, 10),
+                1,
+                pending,
+                255
+            ),
+            Err(R::Unavailable)
+        );
+    }
+    for token in 0..CAPACITY {
+        assert_eq!(
+            reserve(
+                &mut reservations,
+                Action::Accept,
+                1,
+                clock(0, 10),
+                1,
+                50,
+                token
+            ),
+            Err(R::Duplicate)
+        );
+    }
+    assert_eq!(
+        reserve(&mut reservations, Action::Accept, 2, clock(0, 10), 1, 50, 0),
+        Ok(())
+    );
+}
+
+#[test]
+fn p03_accept_capacity_reclaims_only_expired_reservations() {
+    const CAPACITY: u8 = 64;
+
+    let mut reservations = Reservations::default();
+    for token in 0..CAPACITY {
+        assert_eq!(
+            reserve(
+                &mut reservations,
+                Action::Accept,
+                1,
+                clock(0, 10),
+                1,
+                50,
+                token
+            ),
+            Ok(())
+        );
+    }
+    assert_eq!(
+        reserve(
+            &mut reservations,
+            Action::Accept,
+            1,
+            clock(30, 10),
+            1,
+            51,
+            255
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        reserve(
+            &mut reservations,
+            Action::Accept,
+            1,
+            clock(30, 10),
+            1,
+            50,
+            0
+        ),
+        Ok(())
+    );
+}

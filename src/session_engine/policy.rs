@@ -12,6 +12,7 @@ use super::hook::PendingKind;
 
 const VALIDITY: Duration = Duration::from_secs(3);
 const RESERVATION_CAPACITY: usize = 6;
+const ACCEPT_RESERVATION_CAPACITY: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DraftKind {
@@ -318,7 +319,8 @@ struct SessionReservations {
 
 /// Retain one table for the coordinator's process lifetime. It holds at most six
 /// session identities, with no serialization or session eviction. Expired
-/// Accept keys are discarded only after a valid clock comparison.
+/// Accept keys are discarded only after a valid clock comparison. Each session
+/// retains at most `ACCEPT_RESERVATION_CAPACITY` live Accept keys.
 #[derive(Debug, Default)]
 pub struct Reservations {
     sessions: BTreeMap<SessionId, SessionReservations>,
@@ -389,6 +391,9 @@ impl Reservations {
                 let entry = self.sessions.entry(intent.session).or_default();
                 for old_request in expired {
                     entry.accepts.remove(&old_request);
+                }
+                if entry.accepts.len() >= ACCEPT_RESERVATION_CAPACITY {
+                    return Err(RefusalReason::Unavailable);
                 }
                 entry.accepts.insert(request, now);
             }
