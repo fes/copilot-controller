@@ -412,6 +412,7 @@ pub enum RecoveryDecision {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct RecoveryToken {
+    current: Option<RecoveryArtifactToken>,
     pending: RecoveryArtifactToken,
     replacement: Option<RecoveryArtifactToken>,
 }
@@ -425,6 +426,10 @@ struct RecoveryArtifactToken {
 impl fmt::Debug for RecoveryToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RecoveryToken")
+            .field(
+                "current_bytes",
+                &self.current.as_ref().map(|token| token.bytes.len()),
+            )
             .field("pending_bytes", &self.pending.bytes.len())
             .field(
                 "replacement_bytes",
@@ -668,10 +673,13 @@ impl StateStore {
 
     fn read_recovery_evidence(&self, lock: &LockGuard) -> Result<RecoveryEvidence, StoreError> {
         lock.validate()?;
-        let current_bytes = read_bounded_snapshot(&self.root, &current_name())?;
+        let current_artifact = read_artifact(&self.root, &current_name())?;
         let prepared_artifact = read_artifact(&self.root, &pending_name())?;
         let replacement_artifact = read_artifact(&self.root, &replacement_name())?;
-        let current = current_bytes.as_deref().map(decode_snapshot).transpose()?;
+        let current = current_artifact
+            .as_ref()
+            .map(|(bytes, _)| decode_snapshot(bytes))
+            .transpose()?;
         if prepared_artifact.is_none() {
             if replacement_artifact.is_some() {
                 return Err(StoreError::RecoveryRequired);
@@ -684,6 +692,8 @@ impl StateStore {
         }
         let (prepared_bytes, prepared_identity) =
             prepared_artifact.ok_or(StoreError::RecoveryRequired)?;
+        let current_artifact =
+            current_artifact.map(|(bytes, identity)| RecoveryArtifactToken { identity, bytes });
         let replacement_artifact =
             replacement_artifact.map(|(bytes, identity)| RecoveryArtifactToken { identity, bytes });
         let prepared = decode_snapshot(&prepared_bytes)?;
@@ -698,6 +708,7 @@ impl StateStore {
             current,
             prepared: Some(prepared),
             token: Some(RecoveryToken {
+                current: current_artifact,
                 pending: RecoveryArtifactToken {
                     identity: prepared_identity,
                     bytes: prepared_bytes,
@@ -1398,6 +1409,64 @@ mod tests {
                 .unwrap(),
             current_bytes
         );
+    }
+
+    #[test]
+    #[ignore = "requires explicitly approved native mutation filesystem; unsupported on Windows"]
+    fn recovery_token_rejects_replaced_current_snapshot_at_same_revision() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let initial = store.initialize().unwrap();
+        let (_, pending_bytes) = prepared(&store, 1);
+        let plan = store.plan_recovery(Some(0)).unwrap();
+        let token = plan.token().unwrap().clone();
+
+        let mut alternate = initial.clone();
+        alternate.data.hooks.push(PersistedHook {
+            session_id: Uuid::new_v4(),
+            timestamp_ms: 2,
+            kind: HookKind::SessionStart,
+            notification: None,
+        });
+        assert_eq!(alternate.store_id, initial.store_id);
+        assert_eq!(alternate.revision, initial.revision);
+        let alternate_bytes = encode_snapshot(&alternate).unwrap();
+        let root = fixture.root();
+        let alternate_name = Name::new("core-state.alternate.json").unwrap();
+        let lock = root.lock_bounded(&lock_name()).unwrap();
+        lock.create_exclusive(&alternate_name, &alternate_bytes)
+            .unwrap();
+        lock.publish_prepared(
+            &alternate_name,
+            &current_name(),
+            PublishMode::Replace,
+            &alternate_bytes,
+            MAX_SNAPSHOT_BYTES,
+        )
+        .unwrap();
+        drop(lock);
+
+        for decision in [
+            RecoveryDecision::KeepCurrent,
+            RecoveryDecision::CompletePrepared,
+        ] {
+            assert!(matches!(
+                store.recover(Some(0), &token, decision),
+                Err(StoreError::RecoveryPlanChanged)
+            ));
+            assert_eq!(
+                root.read(&current_name(), MAX_SNAPSHOT_BYTES)
+                    .unwrap()
+                    .unwrap(),
+                alternate_bytes
+            );
+            assert_eq!(
+                root.read(&pending_name(), MAX_SNAPSHOT_BYTES)
+                    .unwrap()
+                    .unwrap(),
+                pending_bytes
+            );
+        }
     }
 
     #[test]
