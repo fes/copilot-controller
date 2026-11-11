@@ -9,10 +9,14 @@ use uuid::Uuid;
 use crate::domain::{
     config::{Settings, SlotMap},
     identity::Slot,
+    strict::object,
 };
 
+#[cfg(all(test, unix))]
+use super::root::PublishFailpoint;
 use super::root::{
-    Error as RootError, ErrorKind as RootErrorKind, LockGuard, Name, PrivateRoot, PublishMode,
+    Error as RootError, ErrorKind as RootErrorKind, FileIdentity, LockGuard, Name, PrivateRoot,
+    PublishMode, ReadFile,
 };
 
 pub const MAX_SNAPSHOT_BYTES: usize = 262_144;
@@ -54,7 +58,10 @@ pub enum StoreError {
     },
     RevisionExhausted,
     InvalidRecovery,
+    RecoveryPlanChanged,
     MutationCommitIndeterminate,
+    #[cfg(test)]
+    InjectedCrash,
 }
 
 impl fmt::Display for StoreError {
@@ -77,9 +84,14 @@ impl fmt::Display for StoreError {
             }
             Self::RevisionExhausted => f.write_str("state revision is exhausted"),
             Self::InvalidRecovery => f.write_str("recovery evidence does not form a valid plan"),
+            Self::RecoveryPlanChanged => {
+                f.write_str("recovery evidence changed after the plan was inspected")
+            }
             Self::MutationCommitIndeterminate => {
                 f.write_str("state publication outcome is indeterminate")
             }
+            #[cfg(test)]
+            Self::InjectedCrash => f.write_str("injected publication crash boundary"),
         }
     }
 }
@@ -118,41 +130,109 @@ pub enum NotificationKind {
     ElicitationDialog,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PersistedHook {
-    #[serde(deserialize_with = "canonical_uuid")]
     pub session_id: Uuid,
     pub timestamp_ms: u64,
     pub kind: HookKind,
-    #[serde(deserialize_with = "required_nullable")]
     pub notification: Option<NotificationKind>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawPersistedHook {
+    #[serde(deserialize_with = "canonical_uuid")]
+    session_id: Uuid,
+    timestamp_ms: u64,
+    kind: HookKind,
+    #[serde(deserialize_with = "required_nullable")]
+    notification: Option<NotificationKind>,
+}
+
+impl<'de> Deserialize<'de> for PersistedHook {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw: RawPersistedHook = object(deserializer)?;
+        Ok(Self {
+            session_id: raw.session_id,
+            timestamp_ms: raw.timestamp_ms,
+            kind: raw.kind,
+            notification: raw.notification,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProcessLifetime {
     pub pid: NonZeroU32,
     pub created_ms: NonZeroU64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawProcessLifetime {
+    pid: NonZeroU32,
+    created_ms: NonZeroU64,
+}
+
+impl<'de> Deserialize<'de> for ProcessLifetime {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw: RawProcessLifetime = object(deserializer)?;
+        Ok(Self {
+            pid: raw.pid,
+            created_ms: raw.created_ms,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PendingFork {
-    #[serde(deserialize_with = "canonical_uuid")]
     pub id: Uuid,
     pub slot: Slot,
-    #[serde(deserialize_with = "canonical_uuid")]
     pub source: Uuid,
     pub binding_revision: u64,
     pub process: ProcessLifetime,
     pub issued_ms: u64,
     pub event_offset: u64,
-    #[serde(deserialize_with = "canonical_uuid_vec")]
     pub seen: Vec<Uuid>,
-    #[serde(deserialize_with = "canonical_nullable_uuid")]
     pub child: Option<Uuid>,
     pub conflicted: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPendingFork {
+    #[serde(deserialize_with = "canonical_uuid")]
+    id: Uuid,
+    slot: Slot,
+    #[serde(deserialize_with = "canonical_uuid")]
+    source: Uuid,
+    binding_revision: u64,
+    process: ProcessLifetime,
+    issued_ms: u64,
+    event_offset: u64,
+    #[serde(deserialize_with = "canonical_uuid_vec")]
+    seen: Vec<Uuid>,
+    #[serde(deserialize_with = "canonical_nullable_uuid")]
+    child: Option<Uuid>,
+    conflicted: bool,
+}
+
+impl<'de> Deserialize<'de> for PendingFork {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw: RawPendingFork = object(deserializer)?;
+        Ok(Self {
+            id: raw.id,
+            slot: raw.slot,
+            source: raw.source,
+            binding_revision: raw.binding_revision,
+            process: raw.process,
+            issued_ms: raw.issued_ms,
+            event_offset: raw.event_offset,
+            seen: raw.seen,
+            child: raw.child,
+            conflicted: raw.conflicted,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -176,7 +256,7 @@ struct RawSnapshotData {
 
 impl<'de> Deserialize<'de> for SnapshotData {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = RawSnapshotData::deserialize(deserializer)?;
+        let raw: RawSnapshotData = object(deserializer)?;
         let data = Self {
             settings: raw.settings,
             bindings: raw.bindings,
@@ -291,7 +371,7 @@ struct RawSnapshot {
 
 impl<'de> Deserialize<'de> for Snapshot {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = RawSnapshot::deserialize(deserializer)?;
+        let raw: RawSnapshot = object(deserializer)?;
         if raw.version != 1 || raw.store_id.is_nil() {
             return Err(de::Error::custom(
                 "unsupported or invalid snapshot identity",
@@ -330,18 +410,53 @@ pub enum RecoveryDecision {
     CompletePrepared,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct RecoveryToken {
+    pending: RecoveryArtifactToken,
+    replacement: Option<RecoveryArtifactToken>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct RecoveryArtifactToken {
+    identity: FileIdentity,
+    bytes: Vec<u8>,
+}
+
+impl fmt::Debug for RecoveryToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecoveryToken")
+            .field("pending_bytes", &self.pending.bytes.len())
+            .field(
+                "replacement_bytes",
+                &self.replacement.as_ref().map(|token| token.bytes.len()),
+            )
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecoveryPlan {
     NoRecoveryRequired,
     EqualSnapshots {
         revision: u64,
+        token: RecoveryToken,
     },
     Choices {
         current_revision: Option<u64>,
         prepared_revision: u64,
         keep_current: bool,
         complete_prepared: bool,
+        token: RecoveryToken,
     },
+}
+
+impl RecoveryPlan {
+    pub fn token(&self) -> Option<&RecoveryToken> {
+        match self {
+            Self::NoRecoveryRequired => None,
+            Self::EqualSnapshots { token, .. } | Self::Choices { token, .. } => Some(token),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -349,7 +464,20 @@ pub struct StateStore {
     root: PrivateRoot,
 }
 
-type RecoveryEvidence = (Option<Snapshot>, Option<Snapshot>, Vec<u8>);
+struct RecoveryEvidence {
+    current: Option<Snapshot>,
+    prepared: Option<Snapshot>,
+    token: Option<RecoveryToken>,
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TestCrashPoint {
+    BeforePrepared,
+    PartialPrepared,
+    BeforeRename,
+    AfterRename,
+}
 
 impl StateStore {
     pub fn new(root: PrivateRoot) -> Self {
@@ -412,18 +540,19 @@ impl StateStore {
         expected_current_revision: Option<u64>,
     ) -> Result<RecoveryPlan, StoreError> {
         let lock = self.lock()?;
-        let (current, prepared, _) = self.read_recovery_evidence(&lock)?;
+        let evidence = self.read_recovery_evidence(&lock)?;
         check_expected(
             expected_current_revision,
-            current.as_ref().map(Snapshot::revision),
+            evidence.current.as_ref().map(Snapshot::revision),
         )?;
-        let Some(prepared) = prepared else {
+        let (Some(prepared), Some(token)) = (evidence.prepared, evidence.token) else {
             return Ok(RecoveryPlan::NoRecoveryRequired);
         };
-        if let Some(current) = &current {
+        if let Some(current) = &evidence.current {
             if current == &prepared {
                 return Ok(RecoveryPlan::EqualSnapshots {
                     revision: current.revision,
+                    token,
                 });
             }
             if current.store_id != prepared.store_id
@@ -436,6 +565,7 @@ impl StateStore {
                 prepared_revision: prepared.revision,
                 keep_current: true,
                 complete_prepared: true,
+                token,
             })
         } else if prepared.revision == 0 {
             Ok(RecoveryPlan::Choices {
@@ -443,6 +573,7 @@ impl StateStore {
                 prepared_revision: prepared.revision,
                 keep_current: false,
                 complete_prepared: true,
+                token,
             })
         } else {
             Err(StoreError::InvalidRecovery)
@@ -452,21 +583,28 @@ impl StateStore {
     pub fn recover(
         &self,
         expected_current_revision: Option<u64>,
+        token: &RecoveryToken,
         decision: RecoveryDecision,
     ) -> Result<Snapshot, StoreError> {
         let lock = self.lock()?;
         self.root.check_mutation_support()?;
-        let (current, prepared, prepared_bytes) = self.read_recovery_evidence(&lock)?;
+        let evidence = self.read_recovery_evidence(&lock)?;
         check_expected(
             expected_current_revision,
-            current.as_ref().map(Snapshot::revision),
+            evidence.current.as_ref().map(Snapshot::revision),
         )?;
-        let prepared = prepared.ok_or(StoreError::InvalidRecovery)?;
+        let prepared = evidence.prepared.ok_or(StoreError::InvalidRecovery)?;
+        let actual_token = evidence.token.ok_or(StoreError::InvalidRecovery)?;
+        if token != &actual_token {
+            return Err(StoreError::RecoveryPlanChanged);
+        }
+        let current = evidence.current;
+        let prepared_bytes = &token.pending.bytes;
 
         if let Some(current) = &current {
             if current == &prepared {
                 lock.sync_file(&current_name())?;
-                lock.discard_prepared(&pending_name(), &prepared_bytes, MAX_SNAPSHOT_BYTES)
+                lock.discard_prepared(&pending_name(), prepared_bytes, MAX_SNAPSHOT_BYTES)
                     .map_err(recovery_root_error)?;
                 lock.validate().map_err(post_publication_error)?;
                 return Ok(current.clone());
@@ -483,7 +621,7 @@ impl StateStore {
         match decision {
             RecoveryDecision::KeepCurrent => {
                 let current = current.ok_or(StoreError::InvalidRecovery)?;
-                lock.discard_prepared(&pending_name(), &prepared_bytes, MAX_SNAPSHOT_BYTES)
+                lock.discard_prepared(&pending_name(), prepared_bytes, MAX_SNAPSHOT_BYTES)
                     .map_err(recovery_root_error)?;
                 lock.validate().map_err(post_publication_error)?;
                 Ok(current)
@@ -498,7 +636,7 @@ impl StateStore {
                     &pending_name(),
                     &current_name(),
                     mode,
-                    &prepared_bytes,
+                    prepared_bytes,
                     MAX_SNAPSHOT_BYTES,
                 )
                 .map_err(recovery_root_error)?;
@@ -531,34 +669,42 @@ impl StateStore {
     fn read_recovery_evidence(&self, lock: &LockGuard) -> Result<RecoveryEvidence, StoreError> {
         lock.validate()?;
         let current_bytes = read_bounded_snapshot(&self.root, &current_name())?;
-        let has_prepared = self.root.open_read(&pending_name())?.is_some();
-        let has_replacement = self.root.open_read(&replacement_name())?.is_some();
+        let prepared_artifact = read_artifact(&self.root, &pending_name())?;
+        let replacement_artifact = read_artifact(&self.root, &replacement_name())?;
         let current = current_bytes.as_deref().map(decode_snapshot).transpose()?;
-        if !has_prepared {
-            if has_replacement {
+        if prepared_artifact.is_none() {
+            if replacement_artifact.is_some() {
                 return Err(StoreError::RecoveryRequired);
             }
-            return Ok((current, None, Vec::new()));
+            return Ok(RecoveryEvidence {
+                current,
+                prepared: None,
+                token: None,
+            });
         }
-        let prepared_bytes = read_bounded_snapshot(&self.root, &pending_name())?
-            .ok_or(StoreError::RecoveryRequired)?;
-        let replacement_bytes = if has_replacement {
-            Some(
-                read_bounded_snapshot(&self.root, &replacement_name())?
-                    .ok_or(StoreError::RecoveryRequired)?,
-            )
-        } else {
-            None
-        };
+        let (prepared_bytes, prepared_identity) =
+            prepared_artifact.ok_or(StoreError::RecoveryRequired)?;
+        let replacement_artifact =
+            replacement_artifact.map(|(bytes, identity)| RecoveryArtifactToken { identity, bytes });
         let prepared = decode_snapshot(&prepared_bytes)?;
-        if replacement_bytes
+        if replacement_artifact
             .as_ref()
-            .is_some_and(|replacement| replacement != &prepared_bytes)
+            .is_some_and(|replacement| replacement.bytes != prepared_bytes)
         {
             return Err(StoreError::RecoveryRequired);
         }
         lock.validate()?;
-        Ok((current, Some(prepared), prepared_bytes))
+        Ok(RecoveryEvidence {
+            current,
+            prepared: Some(prepared),
+            token: Some(RecoveryToken {
+                pending: RecoveryArtifactToken {
+                    identity: prepared_identity,
+                    bytes: prepared_bytes,
+                },
+                replacement: replacement_artifact,
+            }),
+        })
     }
 
     fn publish(
@@ -579,6 +725,51 @@ impl StateStore {
             MAX_SNAPSHOT_BYTES,
         )
         .map_err(map_publication_error)
+    }
+
+    #[cfg(all(test, unix))]
+    fn publish_with_crash_point(
+        &self,
+        snapshot: &Snapshot,
+        mode: PublishMode,
+        point: TestCrashPoint,
+    ) -> Result<(), StoreError> {
+        let lock = self.lock()?;
+        let bytes = encode_snapshot(snapshot)?;
+        self.root.check_mutation_support()?;
+        if point == TestCrashPoint::BeforePrepared {
+            return Err(StoreError::InjectedCrash);
+        }
+        if point == TestCrashPoint::PartialPrepared {
+            lock.create_exclusive(&pending_name(), &bytes[..bytes.len() / 2])
+                .map_err(map_publication_error)?;
+            return Err(StoreError::InjectedCrash);
+        }
+        lock.create_exclusive(&pending_name(), &bytes)
+            .map_err(map_publication_error)?;
+        let failpoint = match point {
+            TestCrashPoint::BeforeRename => PublishFailpoint::BeforeRename,
+            TestCrashPoint::AfterRename => PublishFailpoint::AfterRename,
+            TestCrashPoint::BeforePrepared | TestCrashPoint::PartialPrepared => unreachable!(),
+        };
+        lock.publish_prepared_with_failpoint(
+            &pending_name(),
+            &current_name(),
+            mode,
+            &bytes,
+            MAX_SNAPSHOT_BYTES,
+            failpoint,
+        )
+        .map_err(|error| {
+            if matches!(
+                error.operation(),
+                "injected_before_rename" | "injected_after_rename"
+            ) {
+                StoreError::InjectedCrash
+            } else {
+                map_publication_error(error)
+            }
+        })
     }
 }
 
@@ -612,6 +803,32 @@ fn decode_snapshot(bytes: &[u8]) -> Result<Snapshot, StoreError> {
 
 fn read_bounded_snapshot(root: &PrivateRoot, name: &Name) -> Result<Option<Vec<u8>>, StoreError> {
     root.read(name, MAX_SNAPSHOT_BYTES).map_err(|error| {
+        if error.kind() == RootErrorKind::TooLarge {
+            StoreError::SnapshotTooLarge {
+                actual: MAX_SNAPSHOT_BYTES + 1,
+                limit: MAX_SNAPSHOT_BYTES,
+            }
+        } else {
+            StoreError::Root(error)
+        }
+    })
+}
+
+fn read_artifact(
+    root: &PrivateRoot,
+    name: &Name,
+) -> Result<Option<(Vec<u8>, FileIdentity)>, StoreError> {
+    let Some(mut file) = root.open_read(name)? else {
+        return Ok(None);
+    };
+    let identity = file.identity();
+    let bytes = read_bounded_file(&mut file)?;
+    file.verify_current()?;
+    Ok(Some((bytes, identity)))
+}
+
+fn read_bounded_file(file: &mut ReadFile) -> Result<Vec<u8>, StoreError> {
+    file.read_bounded(MAX_SNAPSHOT_BYTES).map_err(|error| {
         if error.kind() == RootErrorKind::TooLarge {
             StoreError::SnapshotTooLarge {
                 actual: MAX_SNAPSHOT_BYTES + 1,
@@ -659,18 +876,22 @@ fn recovery_root_error(error: RootError) -> StoreError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::{
         fs,
+        io::{BufRead, BufReader, Write},
         path::{Path, PathBuf},
+        process::{Command, Stdio},
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
+            mpsc,
         },
         thread,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     #[test]
@@ -880,6 +1101,78 @@ mod tests {
 
     #[test]
     #[ignore = "requires explicitly approved native mutation filesystem; unsupported on Windows"]
+    fn independent_process_writer_observes_stale_disk_revision() {
+        const CHILD_ROOT: &str = "COPILOT_STATE_STORE_WRITER_CHILD";
+        if let Some(path) = std::env::var_os(CHILD_ROOT) {
+            let store = StateStore::new(PrivateRoot::open(path).unwrap());
+            store
+                .transact(0, |data| -> Result<(), ()> {
+                    data.hooks.push(PersistedHook {
+                        session_id: Uuid::new_v4(),
+                        timestamp_ms: 2,
+                        kind: HookKind::SessionStart,
+                        notification: None,
+                    });
+                    Ok(())
+                })
+                .unwrap();
+            println!("CHILD_COMMITTED");
+            let _ = std::io::stdout().flush();
+            return;
+        }
+
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store.initialize().unwrap();
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "persistence::state_store::tests::independent_process_writer_observes_stale_disk_revision",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, &fixture.0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if sender.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut committed = false;
+        while Instant::now() < deadline {
+            match receiver.recv_timeout(deadline - Instant::now()) {
+                Ok(line) if line == "CHILD_COMMITTED" => {
+                    committed = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let status = child.wait().unwrap();
+        reader.join().unwrap();
+        assert!(committed, "child process did not commit the first revision");
+        assert!(status.success());
+
+        assert!(matches!(
+            store.transact(0, |_| -> Result<(), ()> { Ok(()) }),
+            Err(TransactionError::Store(StoreError::StaleRevision {
+                expected: Some(0),
+                actual: Some(1)
+            }))
+        ));
+        assert_eq!(store.load().unwrap().revision(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires explicitly approved native mutation filesystem; unsupported on Windows"]
     fn corruption_and_unknown_schema_are_preserved_without_recovery_guessing() {
         let fixture = Fixture::new();
         let store = fixture.store();
@@ -908,29 +1201,133 @@ mod tests {
 
     #[test]
     #[ignore = "requires explicitly approved native mutation filesystem; unsupported on Windows"]
+    fn array_forms_of_snapshot_and_nested_records_are_preserved_as_corrupt() {
+        let valid = serde_json::to_value(Snapshot {
+            version: 1,
+            store_id: Uuid::new_v4(),
+            revision: 0,
+            data: SnapshotData::default(),
+        })
+        .unwrap();
+        let mut malformed = Vec::new();
+
+        malformed.push(Value::Array(
+            valid.as_object().unwrap().values().cloned().collect(),
+        ));
+
+        let mut data_array = valid.clone();
+        data_array["data"] = Value::Array(vec![
+            valid["data"]["settings"].clone(),
+            valid["data"]["bindings"].clone(),
+            Value::Array(Vec::new()),
+            Value::Array(Vec::new()),
+        ]);
+        malformed.push(data_array);
+
+        let mut settings_array = valid.clone();
+        settings_array["data"]["settings"] = Value::Array(Vec::new());
+        malformed.push(settings_array);
+
+        let mut bindings_array = valid.clone();
+        bindings_array["data"]["bindings"] = Value::Array(Vec::new());
+        malformed.push(bindings_array);
+
+        let mut hook_array = valid.clone();
+        hook_array["data"]["hooks"] = serde_json::json!([[
+            "11111111-1111-4111-8111-111111111111",
+            1,
+            "session_start",
+            null
+        ]]);
+        malformed.push(hook_array);
+
+        let pending_object = serde_json::json!({
+            "id": "11111111-1111-4111-8111-111111111111",
+            "slot": 1,
+            "source": "22222222-2222-4222-8222-222222222222",
+            "binding_revision": 0,
+            "process": {"pid": 1, "created_ms": 1},
+            "issued_ms": 1,
+            "event_offset": 0,
+            "seen": [],
+            "child": null,
+            "conflicted": false
+        });
+        let mut pending_array = valid.clone();
+        pending_array["data"]["pending_forks"] = Value::Array(vec![Value::Array(
+            pending_object
+                .as_object()
+                .unwrap()
+                .values()
+                .cloned()
+                .collect(),
+        )]);
+        malformed.push(pending_array);
+
+        let mut process_array = valid.clone();
+        let mut pending = pending_object;
+        pending["process"] = serde_json::json!([1, 1]);
+        process_array["data"]["pending_forks"] = Value::Array(vec![pending]);
+        malformed.push(process_array);
+
+        for value in malformed {
+            let bytes = serde_json::to_vec(&value).unwrap();
+            let fixture = Fixture::new();
+            let store = fixture.store();
+            store.initialize().unwrap();
+            let root = fixture.root();
+            let lock = root.lock_bounded(&lock_name()).unwrap();
+            lock.create_exclusive(&pending_name(), &bytes).unwrap();
+            lock.publish_prepared(
+                &pending_name(),
+                &current_name(),
+                PublishMode::Replace,
+                &bytes,
+                MAX_SNAPSHOT_BYTES,
+            )
+            .unwrap();
+            drop(lock);
+
+            assert!(matches!(store.load(), Err(StoreError::CorruptSnapshot)));
+            assert_eq!(
+                root.read(&current_name(), MAX_SNAPSHOT_BYTES)
+                    .unwrap()
+                    .unwrap(),
+                bytes
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires explicitly approved native mutation filesystem; unsupported on Windows"]
     fn recovery_plans_cover_keep_complete_equal_and_crash_artifacts() {
         let fixture = Fixture::new();
         let store = fixture.store();
         let current = store.initialize().unwrap();
         let (_, _) = prepared(&store, 1);
-        assert_eq!(
-            store.plan_recovery(Some(0)).unwrap(),
+        let plan = store.plan_recovery(Some(0)).unwrap();
+        assert!(matches!(
+            &plan,
             RecoveryPlan::Choices {
                 current_revision: Some(0),
                 prepared_revision: 1,
                 keep_current: true,
                 complete_prepared: true,
+                ..
             }
-        );
+        ));
+        let token = plan.token().unwrap().clone();
         let kept = store
-            .recover(Some(0), RecoveryDecision::KeepCurrent)
+            .recover(Some(0), &token, RecoveryDecision::KeepCurrent)
             .unwrap();
         assert_eq!(kept.revision(), 0);
         assert!(store.load().is_ok());
 
         let (_, pending_bytes) = prepared(&store, 1);
+        let plan = store.plan_recovery(Some(0)).unwrap();
+        let token = plan.token().unwrap().clone();
         let completed = store
-            .recover(Some(0), RecoveryDecision::CompletePrepared)
+            .recover(Some(0), &token, RecoveryDecision::CompletePrepared)
             .unwrap();
         assert_eq!(completed.revision(), 1);
         assert_eq!(completed.store_id(), current.store_id());
@@ -942,15 +1339,173 @@ mod tests {
         lock.create_exclusive(&replacement_name(), &pending_bytes)
             .unwrap();
         drop(lock);
-        assert_eq!(
-            store.plan_recovery(Some(1)).unwrap(),
-            RecoveryPlan::EqualSnapshots { revision: 1 }
-        );
+        let plan = store.plan_recovery(Some(1)).unwrap();
+        assert!(matches!(
+            &plan,
+            RecoveryPlan::EqualSnapshots { revision: 1, .. }
+        ));
+        let token = plan.token().unwrap().clone();
         let equal = store
-            .recover(Some(1), RecoveryDecision::KeepCurrent)
+            .recover(Some(1), &token, RecoveryDecision::KeepCurrent)
             .unwrap();
         assert_eq!(equal, prepared_snapshot_of(&store, 1));
         assert_eq!(equal.revision(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires explicitly approved native mutation filesystem; unsupported on Windows"]
+    fn recovery_token_rejects_replaced_prepared_artifact_at_same_revision() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store.initialize().unwrap();
+        let current_bytes = fixture
+            .root()
+            .read(&current_name(), MAX_SNAPSHOT_BYTES)
+            .unwrap()
+            .unwrap();
+        let (snapshot_a, bytes_a) = prepared(&store, 1);
+        let plan_a = store.plan_recovery(Some(0)).unwrap();
+        let token_a = plan_a.token().unwrap().clone();
+
+        let mut snapshot_b = snapshot_a;
+        snapshot_b.data.hooks.push(PersistedHook {
+            session_id: Uuid::new_v4(),
+            timestamp_ms: 2,
+            kind: HookKind::SessionStart,
+            notification: None,
+        });
+        let bytes_b = encode_snapshot(&snapshot_b).unwrap();
+        let root = fixture.root();
+        let lock = root.lock_bounded(&lock_name()).unwrap();
+        lock.discard_prepared(&pending_name(), &bytes_a, MAX_SNAPSHOT_BYTES)
+            .unwrap();
+        lock.create_exclusive(&pending_name(), &bytes_b).unwrap();
+        drop(lock);
+
+        assert!(matches!(
+            store.recover(Some(0), &token_a, RecoveryDecision::CompletePrepared),
+            Err(StoreError::RecoveryPlanChanged)
+        ));
+        assert_eq!(
+            root.read(&pending_name(), MAX_SNAPSHOT_BYTES)
+                .unwrap()
+                .unwrap(),
+            bytes_b
+        );
+        assert_eq!(
+            root.read(&current_name(), MAX_SNAPSHOT_BYTES)
+                .unwrap()
+                .unwrap(),
+            current_bytes
+        );
+    }
+
+    #[test]
+    #[ignore = "requires explicitly approved native mutation filesystem; unsupported on Windows"]
+    fn deterministic_publication_failpoints_preserve_each_crash_boundary() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let initial = store.initialize().unwrap();
+        let mut next = initial.clone();
+        next.revision = 1;
+
+        assert!(matches!(
+            store.publish_with_crash_point(
+                &next,
+                PublishMode::Replace,
+                TestCrashPoint::BeforePrepared
+            ),
+            Err(StoreError::InjectedCrash)
+        ));
+        assert_eq!(store.load().unwrap().revision(), 0);
+
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let initial = store.initialize().unwrap();
+        let mut next = initial.clone();
+        next.revision = 1;
+        assert!(matches!(
+            store.publish_with_crash_point(
+                &next,
+                PublishMode::Replace,
+                TestCrashPoint::PartialPrepared
+            ),
+            Err(StoreError::InjectedCrash)
+        ));
+        let root = fixture.root();
+        let partial = root
+            .read(&pending_name(), MAX_SNAPSHOT_BYTES)
+            .unwrap()
+            .unwrap();
+        assert!(!partial.is_empty());
+        assert!(matches!(store.load(), Err(StoreError::RecoveryRequired)));
+        assert_eq!(
+            root.read(&pending_name(), MAX_SNAPSHOT_BYTES)
+                .unwrap()
+                .unwrap(),
+            partial
+        );
+
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let initial = store.initialize().unwrap();
+        let mut next = initial.clone();
+        next.revision = 1;
+        assert!(matches!(
+            store.publish_with_crash_point(
+                &next,
+                PublishMode::Replace,
+                TestCrashPoint::BeforeRename
+            ),
+            Err(StoreError::InjectedCrash)
+        ));
+        assert_eq!(
+            decode_snapshot(
+                &fixture
+                    .root()
+                    .read(&current_name(), MAX_SNAPSHOT_BYTES)
+                    .unwrap()
+                    .unwrap()
+            )
+            .unwrap()
+            .revision(),
+            0
+        );
+        let plan = store.plan_recovery(Some(0)).unwrap();
+        let token = plan.token().unwrap().clone();
+        let recovered = store
+            .recover(Some(0), &token, RecoveryDecision::CompletePrepared)
+            .unwrap();
+        assert_eq!(recovered.revision(), 1);
+
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let initial = store.initialize().unwrap();
+        let mut next = initial;
+        next.revision = 1;
+        assert!(matches!(
+            store.publish_with_crash_point(
+                &next,
+                PublishMode::Replace,
+                TestCrashPoint::AfterRename
+            ),
+            Err(StoreError::InjectedCrash)
+        ));
+        assert!(matches!(store.load(), Err(StoreError::RecoveryRequired)));
+        let plan = store.plan_recovery(Some(1)).unwrap();
+        assert!(matches!(
+            &plan,
+            RecoveryPlan::EqualSnapshots { revision: 1, .. }
+        ));
+        let token = plan.token().unwrap().clone();
+        assert_eq!(
+            store
+                .recover(Some(1), &token, RecoveryDecision::KeepCurrent)
+                .unwrap()
+                .revision(),
+            1
+        );
+        assert!(store.load().is_ok());
     }
 
     #[test]
@@ -969,21 +1524,24 @@ mod tests {
         lock.create_exclusive(&pending_name(), &bytes).unwrap();
         drop(lock);
 
-        assert_eq!(
-            store.plan_recovery(None).unwrap(),
+        let plan = store.plan_recovery(None).unwrap();
+        assert!(matches!(
+            &plan,
             RecoveryPlan::Choices {
                 current_revision: None,
                 prepared_revision: 0,
                 keep_current: false,
                 complete_prepared: true,
+                ..
             }
-        );
+        ));
+        let token = plan.token().unwrap().clone();
         assert!(matches!(
-            store.recover(None, RecoveryDecision::KeepCurrent),
+            store.recover(None, &token, RecoveryDecision::KeepCurrent),
             Err(StoreError::InvalidRecovery)
         ));
         let recovered = store
-            .recover(None, RecoveryDecision::CompletePrepared)
+            .recover(None, &token, RecoveryDecision::CompletePrepared)
             .unwrap();
         assert_eq!(recovered, initial);
         assert_eq!(store.load().unwrap(), initial);
@@ -1030,7 +1588,7 @@ mod tests {
             .unwrap();
         assert!(matches!(store.load(), Err(StoreError::RecoveryRequired)));
         assert!(matches!(
-            store.recover(Some(0), RecoveryDecision::KeepCurrent),
+            store.plan_recovery(Some(0)),
             Err(StoreError::RecoveryRequired)
         ));
         assert_eq!(
@@ -1060,7 +1618,7 @@ mod tests {
         lock.create_exclusive(&replacement_name(), &bytes).unwrap();
         drop(lock);
         assert!(matches!(
-            store.recover(Some(0), RecoveryDecision::CompletePrepared),
+            store.plan_recovery(Some(0)),
             Err(StoreError::RecoveryRequired)
         ));
         assert_eq!(
@@ -1091,7 +1649,7 @@ mod tests {
             .unwrap();
         drop(lock);
         assert!(matches!(
-            store.recover(Some(0), RecoveryDecision::CompletePrepared),
+            store.plan_recovery(Some(0)),
             Err(StoreError::InvalidRecovery)
         ));
         assert_eq!(
@@ -1134,5 +1692,51 @@ mod tests {
                 .unwrap(),
             oversized
         );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests {
+    use super::*;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    #[ignore = "requires an explicitly configured private Windows fixture"]
+    fn durable_mutation_is_explicitly_unsupported_without_namespace_changes() {
+        let base = PathBuf::from(
+            std::env::var_os("COPILOT_PRIVATE_ROOT_FIXTURES")
+                .expect("set COPILOT_PRIVATE_ROOT_FIXTURES to an approved directory"),
+        );
+        assert!(base.is_absolute());
+        assert_eq!(fs::canonicalize(&base).unwrap(), base);
+        let path = base.join(format!(
+            "state-store-windows-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        super::super::root::create_test_private_directory(&path).unwrap();
+        let root = PrivateRoot::open(&path).unwrap();
+        let store = StateStore::new(root.clone());
+
+        assert_eq!(
+            root.check_mutation_support().unwrap_err().kind(),
+            RootErrorKind::UnsupportedPlatform
+        );
+        assert!(matches!(
+            store.initialize(),
+            Err(StoreError::Root(error))
+                if error.kind() == RootErrorKind::UnsupportedPlatform
+        ));
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+        drop(store);
+        drop(root);
+        fs::remove_dir(&path).unwrap();
     }
 }

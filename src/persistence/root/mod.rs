@@ -367,6 +367,11 @@ pub struct ReadFile {
     file: native::File,
 }
 
+/// Opaque identity for one opened state file. It is process-local and must not
+/// be persisted as a cross-boot identifier.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileIdentity(native::Identity);
+
 /// Opaque native identity for a read-only event file. It is not a process or
 /// authority identity and must not be persisted as a cross-boot guarantee.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -484,6 +489,10 @@ fn read_tail_at(
 }
 
 impl ReadFile {
+    pub fn identity(&self) -> FileIdentity {
+        FileIdentity(self.file.id)
+    }
+
     pub fn verify_current(&self) -> Result<()> {
         self.root.validate()?;
         self.root
@@ -550,6 +559,12 @@ pub struct LockGuard {
     file: native::File,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PublishFailpoint {
+    BeforeRename,
+    AfterRename,
+}
+
 impl LockGuard {
     /// Verify the root, the held file, its name association, and zero length.
     pub fn validate(&self) -> Result<()> {
@@ -604,6 +619,38 @@ impl LockGuard {
         mode: PublishMode,
         expected_prepared: &[u8],
         limit: usize,
+    ) -> Result<()> {
+        self.publish_prepared_inner(prepared, destination, mode, expected_prepared, limit, None)
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn publish_prepared_with_failpoint(
+        &self,
+        prepared: &Name,
+        destination: &Name,
+        mode: PublishMode,
+        expected_prepared: &[u8],
+        limit: usize,
+        failpoint: PublishFailpoint,
+    ) -> Result<()> {
+        self.publish_prepared_inner(
+            prepared,
+            destination,
+            mode,
+            expected_prepared,
+            limit,
+            Some(failpoint),
+        )
+    }
+
+    fn publish_prepared_inner(
+        &self,
+        prepared: &Name,
+        destination: &Name,
+        mode: PublishMode,
+        expected_prepared: &[u8],
+        limit: usize,
+        failpoint: Option<PublishFailpoint>,
     ) -> Result<()> {
         self.validate()?;
         self.root.check_mutation_support()?;
@@ -703,6 +750,9 @@ impl LockGuard {
             let destination_id = destination_file.as_ref().map(|file| file.file.id);
             drop(candidate);
             drop(destination_file);
+            if failpoint == Some(PublishFailpoint::BeforeRename) {
+                return Err(Error::new(ErrorKind::Io, "injected_before_rename"));
+            }
             publication_attempted = true;
             self.root
                 .inner
@@ -724,6 +774,9 @@ impl LockGuard {
             published.verify_current()?;
             self.validate()?;
             self.root.inner.sync_dir()?;
+            if failpoint == Some(PublishFailpoint::AfterRename) {
+                return Err(Error::new(ErrorKind::Io, "injected_after_rename"));
+            }
             source.verify_current()?;
             self.validate()?;
             let source_id = source.file.id;

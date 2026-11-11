@@ -39,6 +39,7 @@ impl Fixture {
         Self { path, root }
     }
 
+    #[cfg(unix)]
     fn open_root(&self) -> PrivateRoot {
         let root = PrivateRoot::open(&self.root)
             .unwrap_or_else(|error| panic!("explicit native fixture was rejected: {error}"));
@@ -436,6 +437,7 @@ fn unsafe_roots_ancestor_and_root_substitution_are_refused() {
 
 #[test]
 #[ignore = "requires an explicitly configured, policy-approved native filesystem"]
+#[cfg(unix)]
 fn publication_preserves_old_readers_and_recovery_evidence() {
     let fixture = Fixture::new();
     let root = fixture.open_root();
@@ -519,6 +521,7 @@ fn publication_preserves_old_readers_and_recovery_evidence() {
 
 #[test]
 #[ignore = "requires an explicitly configured, policy-approved native filesystem"]
+#[cfg(unix)]
 fn create_publication_is_exclusive_and_matching_discard_is_explicit() {
     let fixture = Fixture::new();
     let root = fixture.open_root();
@@ -671,6 +674,7 @@ fn lock_child() {
     std::io::stdin().lock().read_line(&mut line).unwrap();
 }
 
+#[cfg(unix)]
 pub(super) fn exercise_process_lock(
     filter: &str,
     variable: &str,
@@ -750,6 +754,7 @@ pub(super) fn exercise_process_lock(
 
 #[test]
 #[ignore = "requires an explicitly configured, policy-approved native filesystem"]
+#[cfg(unix)]
 fn lock_contention_uses_bounded_cross_process_handshakes() {
     let fixture = Fixture::new();
     let root = fixture.open_root();
