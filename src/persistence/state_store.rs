@@ -1139,6 +1139,7 @@ mod tests {
             .args([
                 "--exact",
                 "persistence::state_store::tests::independent_process_writer_observes_stale_disk_revision",
+                "--ignored",
                 "--nocapture",
             ])
             .env(CHILD_ROOT, &fixture.0)
