@@ -143,6 +143,56 @@ fn frame_validation_age_and_decoder_recovery() {
 }
 
 #[test]
+fn json_surrogates_are_preserved_and_decoder_accepts_following_responses() {
+    let unpaired = super::value::parse_json(br#""\ud800""#).unwrap();
+    assert_eq!(super::json::repr_value(unpaired.as_value()), r#"'\ud800'"#);
+    let unpaired_low = super::value::parse_json(br#""\udfff""#).unwrap();
+    assert_eq!(
+        super::json::repr_value(unpaired_low.as_value()),
+        r#"'\udfff'"#
+    );
+    let mut encoded = String::new();
+    super::json::append_json(&mut encoded, unpaired.as_value()).unwrap();
+    assert_eq!(encoded, r#""\ud800""#);
+
+    let private_use_after_surrogate = super::value::parse_json(br#""\ud800\ue000""#).unwrap();
+    assert_eq!(
+        super::json::repr_value(private_use_after_surrogate.as_value()),
+        r#"'\ud800\ue000'"#
+    );
+    let mut encoded = String::new();
+    super::json::append_json(&mut encoded, private_use_after_surrogate.as_value()).unwrap();
+    assert_eq!(
+        super::value::parse_json(encoded.as_bytes()).unwrap(),
+        private_use_after_surrogate
+    );
+
+    let literal_marker = json!("\u{fdd0}sD800");
+    let reports = wire::encode_json(&literal_marker).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&payload(&reports)).unwrap(),
+        literal_marker
+    );
+
+    let paired = super::value::parse_json(br#""\ud83d\ude00""#).unwrap();
+    assert_eq!(paired.as_value(), &Value::String("😀".to_owned()));
+
+    let mut decoder = Decoder::new();
+    let first = frame(2, br#"{"id":101,"result":"\ud800"}"#);
+    let first = decoder.feed(&first, ms(0)).unwrap().unwrap();
+    assert_eq!(
+        super::json::repr_value(first.get("result").unwrap()),
+        r#"'\ud800'"#
+    );
+
+    let second = frame(2, br#"{"id":102,"result":"next"}"#);
+    let second = decoder.feed(&second, ms(1)).unwrap().unwrap();
+    assert_eq!(second.get("id"), Some(&json!(102)));
+    assert_eq!(second.get("result"), Some(&json!("next")));
+    assert!(decoder.buffered_bytes().is_empty());
+}
+
+#[test]
 fn decoder_size_boundary_retains_overflow_and_empty_chunks_do_not_check_age() {
     let mut decoder = Decoder::new();
     let data = [b'x'; 61];

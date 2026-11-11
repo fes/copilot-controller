@@ -4,6 +4,24 @@ use serde_json::{Map, Value, value::RawValue};
 
 use super::json::repr_value;
 
+const SURROGATE_MARKER: char = '\u{fdd0}';
+
+fn append_surrogate(output: &mut String, unit: u16) {
+    output.push(SURROGATE_MARKER);
+    output.push('s');
+    for shift in [12, 8, 4, 0] {
+        let digit = u32::from((unit >> shift) & 0x0f);
+        output.push(char::from_digit(digit, 16).expect("hex digit"));
+    }
+}
+
+fn append_scalar(output: &mut String, scalar: char) {
+    output.push(scalar);
+    if scalar == SURROGATE_MARKER {
+        output.push(SURROGATE_MARKER);
+    }
+}
+
 /// An owned JSON value whose destruction does not recurse through nested data.
 pub struct JsonValue(Option<Value>);
 
@@ -168,10 +186,126 @@ fn attach_value(frames: &mut Frames, root: &mut Option<JsonValue>, value: Value)
     }
 }
 
+fn hex_unit(bytes: &[u8]) -> Option<u16> {
+    let mut unit = 0u16;
+    for byte in bytes {
+        unit = unit.checked_mul(16)?;
+        unit += match byte {
+            b'0'..=b'9' => u16::from(byte - b'0'),
+            b'a'..=b'f' => u16::from(byte - b'a' + 10),
+            b'A'..=b'F' => u16::from(byte - b'A' + 10),
+            _ => return None,
+        };
+    }
+    Some(unit)
+}
+
+fn sanitize_surrogates(bytes: &[u8]) -> Vec<u8> {
+    let mut sanitized = bytes.to_vec();
+    let mut at = 0;
+    let mut in_string = false;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'"' => {
+                in_string = !in_string;
+                at += 1;
+            }
+            b'\\' if in_string && bytes.get(at + 1) == Some(&b'u') => {
+                let Some(unit) = bytes.get(at + 2..at + 6).and_then(hex_unit) else {
+                    at += 2;
+                    continue;
+                };
+                if (0xd800..=0xdbff).contains(&unit) {
+                    let paired_low = bytes
+                        .get(at + 6..at + 12)
+                        .filter(|escape| escape[..2] == *b"\\u")
+                        .and_then(|escape| hex_unit(&escape[2..]))
+                        .is_some_and(|low| (0xdc00..=0xdfff).contains(&low));
+                    if paired_low {
+                        at += 12;
+                        continue;
+                    }
+                }
+                if (0xd800..=0xdfff).contains(&unit) {
+                    sanitized[at + 2..at + 6].copy_from_slice(b"0000");
+                }
+                at += 6;
+            }
+            b'\\' if in_string => at += 2,
+            _ => at += 1,
+        }
+    }
+    sanitized
+}
+
+fn decode_json_string(bytes: &[u8]) -> Result<String, JsonParseError> {
+    let mut result = String::new();
+    let mut at = 1;
+    while at + 1 < bytes.len() {
+        if bytes[at] == b'\\' {
+            at += 1;
+            match bytes[at] {
+                b'"' => result.push('"'),
+                b'\\' => result.push('\\'),
+                b'/' => result.push('/'),
+                b'b' => result.push('\u{8}'),
+                b'f' => result.push('\u{c}'),
+                b'n' => result.push('\n'),
+                b'r' => result.push('\r'),
+                b't' => result.push('\t'),
+                b'u' => {
+                    let unit = hex_unit(&bytes[at + 1..at + 5]).ok_or(JsonParseError)?;
+                    at += 4;
+                    if (0xd800..=0xdbff).contains(&unit)
+                        && bytes.get(at + 1..at + 7).is_some_and(|escape| {
+                            escape[..2] == *b"\\u"
+                                && hex_unit(&escape[2..])
+                                    .is_some_and(|low| (0xdc00..=0xdfff).contains(&low))
+                        })
+                    {
+                        let low = hex_unit(&bytes[at + 3..at + 7]).ok_or(JsonParseError)?;
+                        let scalar = 0x10000
+                            + ((u32::from(unit) - 0xd800) << 10)
+                            + (u32::from(low) - 0xdc00);
+                        result.push(char::from_u32(scalar).ok_or(JsonParseError)?);
+                        at += 6;
+                    } else if (0xd800..=0xdfff).contains(&unit) {
+                        append_surrogate(&mut result, unit);
+                    } else {
+                        append_scalar(
+                            &mut result,
+                            char::from_u32(u32::from(unit)).ok_or(JsonParseError)?,
+                        );
+                    }
+                }
+                _ => return Err(JsonParseError),
+            }
+            at += 1;
+        } else {
+            let width = match bytes[at] {
+                0x00..=0x7f => 1,
+                0xc2..=0xdf => 2,
+                0xe0..=0xef => 3,
+                0xf0..=0xf4 => 4,
+                _ => return Err(JsonParseError),
+            };
+            let text = std::str::from_utf8(bytes.get(at..at + width).ok_or(JsonParseError)?)
+                .map_err(|_| JsonParseError)?;
+            let character = text.chars().next().ok_or(JsonParseError)?;
+            append_scalar(&mut result, character);
+            at += width;
+        }
+    }
+    Ok(result)
+}
+
 /// Parses the complete JSON document without a nesting limit or recursive drop.
-/// Non-Unicode scalar escapes are rejected by serde_json's string decoder.
+/// Escaped unpaired UTF-16 code units use an escaped internal string marker.
 pub fn parse_json(bytes: &[u8]) -> Result<JsonValue, JsonParseError> {
-    let raw: &RawValue = serde_json::from_slice(bytes).map_err(|_| JsonParseError)?;
+    let input = bytes;
+    let sanitized = sanitize_surrogates(bytes);
+    let raw: &RawValue = serde_json::from_slice(&sanitized).map_err(|_| JsonParseError)?;
+    let raw_offset = raw.get().as_ptr() as usize - sanitized.as_ptr() as usize;
     let bytes = raw.get().as_bytes();
     let mut frames = Frames::default();
     let mut root = None;
@@ -217,8 +351,7 @@ pub fn parse_json(bytes: &[u8]) -> Result<JsonValue, JsonParseError> {
                         _ => at += 1,
                     }
                 }
-                let text: String =
-                    serde_json::from_slice(&bytes[start..at]).map_err(|_| JsonParseError)?;
+                let text = decode_json_string(&input[raw_offset + start..raw_offset + at])?;
                 match frames.0.last_mut() {
                     Some(Frame::Object { key, .. }) if key.is_none() => *key = Some(text),
                     _ => attach_value(&mut frames, &mut root, Value::String(text)),

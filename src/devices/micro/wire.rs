@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use super::enumeration::REPORT_SIZE;
 use super::error::MicroError;
-use super::json::append_json;
+use super::json::append_json_plain;
 use super::value::{JsonObject, parse_json};
 
 pub const REPORT_ID: u8 = 6;
@@ -33,7 +33,7 @@ pub(crate) fn frame_bytes(bytes: &[u8]) -> Vec<Report> {
 /// Encodes compact JSON; ordinary object keys are sorted.
 pub fn encode_json(value: &Value) -> Result<Vec<Report>, MicroError> {
     let mut json = String::new();
-    append_json(&mut json, value).map_err(|_| MicroError::Serialization)?;
+    append_json_plain(&mut json, value).map_err(|_| MicroError::Serialization)?;
     Ok(frame_bytes(json.as_bytes()))
 }
 

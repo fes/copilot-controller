@@ -3,6 +3,26 @@ use std::fmt::Write as _;
 use serde_json::Value;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
+const SURROGATE_MARKER: char = '\u{fdd0}';
+
+fn take_surrogate_token(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<u16> {
+    if chars.peek() != Some(&'s') {
+        return None;
+    }
+    let token: String = chars.clone().take(5).collect();
+    if token.len() != 5 {
+        return None;
+    }
+    let unit = u16::from_str_radix(&token[1..], 16).ok()?;
+    if !(0xd800..=0xdfff).contains(&unit) {
+        return None;
+    }
+    for _ in 0..5 {
+        chars.next();
+    }
+    Some(unit)
+}
+
 pub(crate) fn python_whitespace(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
 }
@@ -78,7 +98,18 @@ pub(crate) fn repr_string(value: &str) -> String {
     };
     let mut result = String::new();
     result.push(quote);
-    for c in value.chars() {
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == SURROGATE_MARKER
+            && let Some(&next) = chars.peek()
+        {
+            if next == SURROGATE_MARKER {
+                chars.next();
+            } else if let Some(unit) = take_surrogate_token(&mut chars) {
+                write!(result, "\\u{unit:04x}").expect("writing to a string cannot fail");
+                continue;
+            }
+        }
         match c {
             '\\' => result.push_str("\\\\"),
             '\t' => result.push_str("\\t"),
@@ -190,7 +221,35 @@ fn render_number(number: &serde_json::Number) -> String {
 }
 
 pub(crate) fn append_json_string(output: &mut String, text: &str) -> Result<(), ()> {
-    output.push_str(&serde_json::to_string(text).map_err(|_| ())?);
+    fn append_chunk(output: &mut String, chunk: &str) -> Result<(), ()> {
+        let encoded = serde_json::to_string(chunk).map_err(|_| ())?;
+        output.push_str(&encoded[1..encoded.len() - 1]);
+        Ok(())
+    }
+
+    output.push('"');
+    let mut chunk = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == SURROGATE_MARKER
+            && let Some(&next) = chars.peek()
+        {
+            if next == SURROGATE_MARKER {
+                chars.next();
+                chunk.push(SURROGATE_MARKER);
+                continue;
+            }
+            if let Some(unit) = take_surrogate_token(&mut chars) {
+                append_chunk(output, &chunk)?;
+                chunk.clear();
+                write!(output, "\\u{unit:04x}").expect("writing to a string cannot fail");
+                continue;
+            }
+        }
+        chunk.push(character);
+    }
+    append_chunk(output, &chunk)?;
+    output.push('"');
     Ok(())
 }
 
@@ -200,7 +259,12 @@ enum RenderItem<'a> {
     String(&'a str),
 }
 
-fn render(output: &mut String, value: &Value, python: bool) -> Result<(), ()> {
+fn render(
+    output: &mut String,
+    value: &Value,
+    python: bool,
+    surrogate_tokens: bool,
+) -> Result<(), ()> {
     let mut pending = vec![RenderItem::Value(value)];
     while let Some(item) = pending.pop() {
         match item {
@@ -208,8 +272,10 @@ fn render(output: &mut String, value: &Value, python: bool) -> Result<(), ()> {
             RenderItem::String(text) => {
                 if python {
                     output.push_str(&repr_string(text));
-                } else {
+                } else if surrogate_tokens {
                     append_json_string(output, text)?;
+                } else {
+                    output.push_str(&serde_json::to_string(text).map_err(|_| ())?);
                 }
             }
             RenderItem::Value(Value::Null) => {
@@ -273,7 +339,7 @@ fn render(output: &mut String, value: &Value, python: bool) -> Result<(), ()> {
 
 pub(crate) fn repr_value(value: &Value) -> String {
     let mut result = String::new();
-    render(&mut result, value, true).expect("Python rendering cannot fail");
+    render(&mut result, value, true, true).expect("Python rendering cannot fail");
     result
 }
 
@@ -285,5 +351,9 @@ pub(crate) fn str_value(value: &Value) -> String {
 }
 
 pub(crate) fn append_json(output: &mut String, value: &Value) -> Result<(), ()> {
-    render(output, value, false)
+    render(output, value, false, true)
+}
+
+pub(crate) fn append_json_plain(output: &mut String, value: &Value) -> Result<(), ()> {
+    render(output, value, false, false)
 }
