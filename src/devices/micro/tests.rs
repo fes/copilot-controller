@@ -259,6 +259,39 @@ fn replay_json_enforces_depth_and_output_size_limits() {
         over_size_limit.to_json(),
         Err(JsonSerializeError::SizeLimit)
     );
+
+    let oversized_number = format!("1{}", "0".repeat(MAX_REPLAY_JSON_BYTES));
+    let number: Value = serde_json::from_str(&oversized_number).unwrap();
+    assert_eq!(
+        JsonValue::from_value(number).to_json(),
+        Err(JsonSerializeError::SizeLimit)
+    );
+}
+
+#[test]
+fn json_value_equality_respects_surrogate_token_provenance() {
+    use super::value::JsonValue;
+
+    let parsed = super::value::parse_json(br#""\ud800""#).unwrap();
+    let literal = JsonValue::from_value(json!("\u{fdd0}sd800"));
+
+    assert_eq!(parsed.as_value(), literal.as_value());
+    assert_ne!(parsed, literal);
+    assert!(!parsed.eq(literal.as_value()));
+    assert_eq!(parsed.to_json().unwrap(), r#""\ud800""#);
+
+    let replayed_literal = literal.to_json().unwrap();
+    let decoded: Value = serde_json::from_str(&replayed_literal).unwrap();
+    assert_eq!(&decoded, literal.as_value());
+
+    let parsed_marker = super::value::parse_json(br#""\ufdd0""#).unwrap();
+    let literal_markers = JsonValue::from_value(json!("\u{fdd0}\u{fdd0}"));
+    assert_eq!(parsed_marker.as_value(), literal_markers.as_value());
+    assert_ne!(parsed_marker, literal_markers);
+    assert_ne!(parsed_marker.to_json(), literal_markers.to_json());
+
+    let parsed_text = super::value::parse_json(br#""ordinary""#).unwrap();
+    assert_eq!(parsed_text, JsonValue::from_value(json!("ordinary")));
 }
 
 #[test]

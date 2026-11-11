@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde_json::{Map, Value, value::RawValue};
 
-use super::json::{repr_value, serialize_replay_json};
+use super::json::{has_surrogate_encoding, repr_value, serialize_replay_json};
 
 const SURROGATE_MARKER: char = '\u{fdd0}';
 /// Maximum encoded size returned by the replay JSON serializers.
@@ -48,6 +48,7 @@ impl std::error::Error for JsonSerializeError {}
 /// An owned JSON value whose destruction does not recurse through nested data.
 pub struct JsonValue {
     value: Option<Value>,
+    // Parsed values encode surrogate code units in otherwise-valid Rust strings.
     surrogate_tokens: bool,
 }
 
@@ -152,12 +153,25 @@ fn equal_values(left: &Value, right: &Value) -> bool {
 
 impl PartialEq for JsonValue {
     fn eq(&self, other: &Self) -> bool {
+        if self.surrogate_tokens != other.surrogate_tokens {
+            let tokenized = if self.surrogate_tokens {
+                self.as_value()
+            } else {
+                other.as_value()
+            };
+            if has_surrogate_encoding(tokenized) {
+                return false;
+            }
+        }
         equal_values(self.as_value(), other.as_value())
     }
 }
 
 impl PartialEq<Value> for JsonValue {
     fn eq(&self, other: &Value) -> bool {
+        if self.surrogate_tokens && has_surrogate_encoding(self.as_value()) {
+            return false;
+        }
         equal_values(self.as_value(), other)
     }
 }

@@ -394,6 +394,16 @@ struct ReplayWriter {
     output: String,
 }
 
+impl std::fmt::Write for ReplayWriter {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        if self.output.len().saturating_add(text.len()) > MAX_REPLAY_JSON_BYTES {
+            return Err(std::fmt::Error);
+        }
+        self.output.push_str(text);
+        Ok(())
+    }
+}
+
 impl ReplayWriter {
     fn push_str(&mut self, text: &str) -> Result<(), JsonSerializeError> {
         if self.output.len().saturating_add(text.len()) > MAX_REPLAY_JSON_BYTES {
@@ -480,7 +490,9 @@ pub(crate) fn serialize_replay_json(
                 Value::Bool(value) => {
                     writer.push_str(if *value { "true" } else { "false" })?;
                 }
-                Value::Number(number) => writer.push_str(&number.to_string())?,
+                Value::Number(number) => {
+                    write!(&mut writer, "{number}").map_err(|_| JsonSerializeError::SizeLimit)?;
+                }
                 Value::String(text) => {
                     writer.push_json_string(text, surrogate_tokens)?;
                 }
@@ -572,6 +584,26 @@ pub(crate) fn repr_value(value: &Value) -> String {
 
 pub(crate) fn repr_plain_value(value: &Value) -> String {
     repr_value_with_tokens(value, false)
+}
+
+pub(crate) fn has_surrogate_encoding(value: &Value) -> bool {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::String(text) if text.contains(SURROGATE_MARKER) => return true,
+            Value::Array(values) => pending.extend(values),
+            Value::Object(values) => {
+                for (key, value) in values {
+                    if key.contains(SURROGATE_MARKER) {
+                        return true;
+                    }
+                    pending.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn repr_value_with_tokens(value: &Value, surrogate_tokens: bool) -> String {
