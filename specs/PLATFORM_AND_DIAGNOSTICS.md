@@ -993,7 +993,9 @@ Use test-only callbacks, never expand production allowlist for fixtures:
 4. Stall60s with750ms deadline -> timed_out, retained worker identity, confirmed exit, replacement allowed; controlled elapsed under10s; next health succeeds.
 5. Cancel stalled probe after750ms -> confirmed exit before cancelled safe-replacement result.
 6. Private callback error -> generic callback, no private text.
-7. 128KiB response -> transport in current failure mapping.
+7. Cooperative callback returning a 128KiB value -> correlated
+   `response_encoding_failed` fallback, mapped to `frame_limit` after confirmed
+   worker exit; replacement allowed. This is not an uncooperative raw-frame case.
 8. Stdout `not-a-frame` -> frame_limit.
 9. Stderr32KiB -> diagnostic_limit.
 10. Each fully cleaned failure permits subsequent health.

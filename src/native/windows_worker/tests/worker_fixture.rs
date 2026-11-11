@@ -253,7 +253,7 @@ mod windows_fixture {
         for (mode, expected) in [
             ("error", WorkerErrorKind::Callback),
             ("panic", WorkerErrorKind::Callback),
-            ("large", WorkerErrorKind::Transport),
+            ("large", WorkerErrorKind::FrameLimit),
             ("stdout", WorkerErrorKind::FrameLimit),
             ("stderr", WorkerErrorKind::DiagnosticLimit),
         ] {

@@ -621,9 +621,11 @@ impl ProbeSession<'_> {
         led: Option<&[super::led::LedEntry; 6]>,
         cleanup: bool,
     ) -> Result<Option<super::value::JsonValue>, String> {
-        if self.rpc.next_request_id() != Some(101) {
-            self.drain()?;
-        }
+        let drain_complete = if self.rpc.next_request_id() != Some(101) {
+            self.drain(cleanup)?
+        } else {
+            true
+        };
         if cleanup {
             self.rpc.abandon_pending();
         }
@@ -651,6 +653,13 @@ impl ProbeSession<'_> {
             self.rpc
                 .confirm_write(count, self.io.now())
                 .map_err(|error| error.to_string())?;
+        }
+
+        if !drain_complete {
+            return Err(
+                "Micro read budget exhausted; cleanup drain incomplete; shutdown written without acknowledgement"
+                    .to_owned(),
+            );
         }
 
         loop {
@@ -683,13 +692,18 @@ impl ProbeSession<'_> {
         }
     }
 
-    fn drain(&mut self) -> Result<(), String> {
+    fn drain(&mut self, cleanup: bool) -> Result<bool, String> {
         let deadline = self
             .io
             .now()
             .checked_add(DRAIN_INTERVAL)
             .ok_or_else(|| "Micro clock out of range".to_owned())?;
         while self.io.now() < deadline {
+            // An exhausted receive budget cannot forbid a complete shutdown
+            // write. It still forbids draining or reading its acknowledgement.
+            if cleanup && self.report.read_reports >= READ_BUDGET {
+                return Ok(false);
+            }
             let timeout = READ_SLICE.min(deadline.saturating_sub(self.io.now()));
             match read_one(self.io, self.report, self.started, timeout)? {
                 ReadOutcome::Packet(packet) => {
@@ -706,7 +720,7 @@ impl ProbeSession<'_> {
                 ReadOutcome::Ignored | ReadOutcome::Idle => {}
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn capture(&mut self, duration: Duration) -> Result<(), String> {
@@ -1175,7 +1189,7 @@ mod tests {
                 report: &mut report,
                 started: Duration::ZERO,
             }
-            .drain()
+            .drain(false)
             .unwrap();
             assert_eq!(io.now, DRAIN_INTERVAL);
             assert_eq!(io.timeouts, [50, 40, 30, 20, 10].map(Duration::from_millis));
@@ -1403,6 +1417,72 @@ mod tests {
         assert_eq!(result.report.nonvendor_reports_ignored, 512);
         assert_eq!(fake.incoming.len(), 0);
         assert_eq!(result.error.as_deref(), Some("Micro read budget exhausted"));
+    }
+
+    #[test]
+    fn exhausted_capture_or_cleanup_drain_still_writes_shutdown_without_extra_reads() {
+        for capture_ms in [0, 100] {
+            let (mut fake, pattern_complete) = pattern_flow_fake(true, false);
+            let cleanup_reply = fake.reply_after_writes.pop_back().unwrap();
+            // Version, status and pattern replies consume three report reads.
+            fake.reply_after_writes.extend(std::iter::repeat_n(
+                (pattern_complete, vec![1]),
+                READ_BUDGET - 3,
+            ));
+            fake.reply_after_writes.push_back(cleanup_reply);
+            let result = run_qualified(
+                &mut fake,
+                &descriptor(),
+                MicroProbeOptions {
+                    query: true,
+                    test_pattern: true,
+                    capture_ms,
+                    ..Default::default()
+                },
+            );
+            assert!(!result.probe_succeeded);
+            assert!(result.report.led_test_attempted);
+            assert!(!result.report.led_clear_acknowledged);
+            assert!(!result.report.write_failed);
+            assert_eq!(result.report.read_reports, READ_BUDGET);
+            assert_eq!(result.report.nonvendor_reports_ignored, READ_BUDGET - 3);
+            assert_eq!(result.report.elapsed_ms, 100);
+            assert_eq!(fake.incoming, VecDeque::from([response(104, Value::Null)]));
+            assert_eq!(
+                result.report.cleanup_error.as_deref(),
+                Some(
+                    "Micro read budget exhausted; cleanup drain incomplete; shutdown written without acknowledgement"
+                ),
+            );
+            if capture_ms == 0 {
+                assert_eq!(result.error, result.report.cleanup_error);
+            } else {
+                assert_eq!(result.error.as_deref(), Some("Micro read budget exhausted"));
+            }
+            let shutdown_count = RpcClient::new()
+                .begin_led(&shutdown_frame())
+                .unwrap()
+                .reports
+                .len();
+            assert_eq!(fake.writes.len(), pattern_complete + shutdown_count);
+            assert_eq!(result.report.output_attempts, fake.writes.len());
+            assert_eq!(result.report.output_reports, fake.writes.len());
+            assert_eq!(result.report.output_bytes, fake.writes.len() * REPORT_SIZE);
+            let mut decoder = crate::devices::micro::wire::Decoder::new();
+            let mut clear = None;
+            for report in &fake.writes[pattern_complete..] {
+                if let Some(message) = decoder.feed(report, Duration::ZERO).unwrap() {
+                    assert!(clear.replace(message).is_none());
+                }
+            }
+            let clear = clear.unwrap();
+            assert_eq!(clear.as_map().get("method"), Some(&json!("v.oai.thstatus")));
+            assert_eq!(clear.as_map().get("id"), Some(&json!(104)));
+            assert_eq!(
+                clear.as_map().get("params"),
+                Some(&serde_json::to_value(shutdown_frame()).unwrap()),
+            );
+        }
     }
 
     #[test]

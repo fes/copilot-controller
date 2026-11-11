@@ -651,6 +651,18 @@ Old query firmware remains recorded but fails before status/keymap/LED operation
 
 Attempt shutdown after an attempted LED test even if its response timed out or later acquisition failed, **unless any write failed**. Reuse existing RPC/framing state, so cleanup may also fail on accumulated parse/budget problems.
 
+Read-budget exhaustion does not prohibit the shutdown write. Cleanup drains
+for the fixed 50ms interval while the original 512-report budget permits reads;
+if exhausted before or during that drain, stop it without another read and send
+the complete shutdown request once. Do not extend/reset the read budget, retry
+writes, or read an acknowledgement at the limit. After full shutdown writes,
+set `cleanup_error` to `Micro read budget exhausted; cleanup drain incomplete;
+shutdown written without acknowledgement` and leave `led_clear_acknowledged=false`.
+Preserve an existing primary acquisition error; if cleanup was the first
+failure, it becomes the primary error too. A short/failed shutdown write stops
+immediately with its actual write error instead. All non-cleanup drains retain
+the full fixed-interval contract or fail before their RPC write.
+
 Clear acknowledgement proves an RPC result, not witnessed darkness. Clear failure sets `cleanup_error`, leaves acknowledgement false, and converts prior success to failure. If there was already a primary failure, retain it as `error` while also preserving cleanup error.
 
 Pre-open/descriptor/option failures may retain their current phase rather than `failed` because runner finalization was not reached. Health-check success retains `health_check`.
