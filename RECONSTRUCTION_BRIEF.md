@@ -86,9 +86,14 @@ Commit the toolchain selection and lockfile, and support:
 | Safe persistent state and cooperative owner | Fixed local disk | Local APFS | Local ext-family, XFS, Btrfs |
 
 Use three optional Cargo features: `akp03-hid`, `micro-hid`, and
-`micro-firmware`; the last implies `micro-hid`. All offline behavior remains
-available without them. Building a feature does not imply a connected device,
-permissions, qualification, enrollment, or terminal-action readiness.
+`micro-firmware`. They are independent: `micro-firmware` enables offline
+pinned-artifact validation, not HID metadata or probing; select `micro-hid`
+separately for those capabilities. This keeps local artifact validation from
+implicitly enabling a native device backend. Pure engine, codec, and preview
+behavior remains available without these features. Native firmware execution
+remains unavailable. Building a feature does not imply a connected device,
+permissions, qualification, enrollment, or terminal-action readiness; native
+probes still require explicit opt-in, worker containment, and exact evidence.
 
 ## 3. Observable command interface
 
@@ -1226,10 +1231,10 @@ temporary directory.
 
 ```sh
 cargo test --locked --all-targets
-cargo test --locked --all-targets --features akp03-hid,micro-firmware
+cargo test --locked --all-targets --features akp03-hid,micro-hid,micro-firmware
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets --features akp03-hid,micro-firmware -- -D warnings
-cargo build --locked --release --features akp03-hid,micro-firmware
+cargo clippy --locked --all-targets --features akp03-hid,micro-hid,micro-firmware -- -D warnings
+cargo build --locked --release --features akp03-hid,micro-hid,micro-firmware
 cargo check --locked --all-targets --target aarch64-pc-windows-msvc
 ```
 
