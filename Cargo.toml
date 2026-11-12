@@ -1,0 +1,26 @@
+[package]
+name = "copilot-controller"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+description = "Offline foundation contracts for a six-slot controller"
+
+[lib]
+name = "copilot_controller"
+path = "src/lib.rs"
+
+[[bin]]
+name = "copilot-controller"
+path = "src/main.rs"
+
+[features]
+default = []
+akp03-hid = []
+micro-hid = []
+micro-firmware = ["micro-hid"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+unicode-general-category = "=1.1.0"
+uuid = { version = "1", features = ["v4"] }
